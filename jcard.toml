@@ -1,0 +1,3 @@
+[agent]
+harness = "claude-code"
+prompt = "Hello world!"

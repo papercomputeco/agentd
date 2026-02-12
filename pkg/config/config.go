@@ -36,8 +36,8 @@ const (
 	DefaultRestart = RestartNo
 )
 
-// validHarnesses lists the built-in harness names.
-var validHarnesses = map[string]bool{
+// harnessSet are the built-in harnesses.
+var harnessSet = map[string]bool{
 	"claude-code": true,
 	"opencode":    true,
 	"gemini-cli":  true,
@@ -145,7 +145,7 @@ func (c *AgentConfig) Validate() error {
 	if c.Harness == "" {
 		return fmt.Errorf("agent.harness is required")
 	}
-	if !validHarnesses[c.Harness] {
+	if !harnessSet[c.Harness] {
 		return fmt.Errorf("unknown agent.harness %q: must be one of claude-code, opencode, gemini-cli, custom", c.Harness)
 	}
 

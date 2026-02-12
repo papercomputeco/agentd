@@ -1,16 +1,16 @@
 // Package main is the entry point for agentd (agent daemon).
 //
-// agentd is a service that starts, supervises, and stops configured agent
+// agentd is a service that starts, manages, and stops configured agent
 // harnesses (Claude Code, OpenCode, Gemini CLI, etc.) based on the
 // jcard.toml [agent] configuration.
 //
 // Agent runtime management launches tmux sessions as the main harness for
-// the AI agent user, which also allows the admin user to "tmux attach"
-// to introspect the running agent.
+// the AI agent user, which also allows an admin user to "tmux attach"
+// to introspect a running agent.
 //
-// agentd communicates with stereosd over a local unix socket. stereosd writes
-// secrets to a tmpfs for agentd to consume. agentd is started after
-// stereosd via After=stereosd.service.
+// agentd serves its own API over a Unix domain socket so that external
+// consumers (stereosd, CLI tools, monitoring) can pull agent state.
+// Configuration and secrets are read from disk via a reconciliation loop.
 package main
 
 import (
@@ -26,6 +26,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", agentd.DefaultConfigPath, "path to jcard.toml configuration file")
+	apiSocket := flag.String("api-socket", agentd.DefaultAPISocketPath, "path to agentd API unix socket")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -35,6 +36,10 @@ func main() {
 	defer cancel()
 
 	daemon := agentd.NewDaemon(*configPath)
+	if *apiSocket != agentd.DefaultAPISocketPath {
+		daemon.SetAPISocketPath(*apiSocket)
+	}
+
 	if err := daemon.Run(ctx); err != nil {
 		log.Fatalf("agentd: fatal: %v", err)
 		os.Exit(1)

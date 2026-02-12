@@ -64,6 +64,30 @@ var _ = Describe("Supervisor", func() {
 			Expect(status.Name).To(Equal("opencode"))
 			Expect(status.Running).To(BeFalse())
 			Expect(status.Session).To(Equal("opencode"))
+			Expect(status.Restarts).To(Equal(0))
+			Expect(status.Error).To(BeEmpty())
+		})
+	})
+
+	Describe("Restarts", func() {
+		It("should return zero initially", func() {
+			h, err := harness.Get("claude-code")
+			Expect(err).NotTo(HaveOccurred())
+
+			cfg := &config.AgentConfig{
+				Harness:     "claude-code",
+				Workdir:     "/workspace",
+				Restart:     config.RestartNo,
+				GracePeriod: "30s",
+				Session:     "claude-code",
+			}
+
+			sup := supervisor.NewSupervisor(supervisor.Opts{
+				Config:  cfg,
+				Harness: h,
+			})
+
+			Expect(sup.Restarts()).To(Equal(0))
 		})
 	})
 })
