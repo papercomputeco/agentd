@@ -21,12 +21,15 @@ import (
 	"os/signal"
 	"syscall"
 
-	agentd "github.com/papercomputeco/agentd/pkg"
+	"github.com/papercomputeco/agentd/agentd"
 )
 
 func main() {
 	configPath := flag.String("config", agentd.DefaultConfigPath, "path to jcard.toml configuration file")
 	apiSocket := flag.String("api-socket", agentd.DefaultAPISocketPath, "path to agentd API unix socket")
+	secretDir := flag.String("secret-dir", agentd.SecretDir, "path to secrets directory")
+	tmuxSocket := flag.String("tmux-socket", agentd.TmuxSocketPath, "path to tmux server socket")
+	debug := flag.Bool("debug", false, "enable debug logging (logs commands, env keys, captures pane output on exit)")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -38,6 +41,15 @@ func main() {
 	daemon := agentd.NewDaemon(*configPath)
 	if *apiSocket != agentd.DefaultAPISocketPath {
 		daemon.SetAPISocketPath(*apiSocket)
+	}
+	if *secretDir != agentd.SecretDir {
+		daemon.SetSecretDir(*secretDir)
+	}
+	if *tmuxSocket != agentd.TmuxSocketPath {
+		daemon.SetTmuxSocketPath(*tmuxSocket)
+	}
+	if *debug {
+		daemon.SetDebug(true)
 	}
 
 	if err := daemon.Run(ctx); err != nil {

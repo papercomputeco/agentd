@@ -1,3 +1,3 @@
 [agent]
-harness = "claude-code"
+harness = "opencode"
 prompt = "Hello world!"

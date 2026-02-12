@@ -6,7 +6,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/papercomputeco/agentd/pkg"
+	"github.com/papercomputeco/agentd/agentd"
 )
 
 func TestAgentd(t *testing.T) {

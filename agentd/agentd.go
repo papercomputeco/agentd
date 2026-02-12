@@ -60,6 +60,7 @@ type Daemon struct {
 	apiSocketPath     string
 	tmuxSocketPath    string
 	reconcileInterval time.Duration
+	debug             bool
 
 	// runtime state, guarded by mu
 	mu         sync.Mutex
@@ -107,6 +108,13 @@ func (d *Daemon) SetSecretDir(path string) {
 // SetReconcileInterval overrides the default reconcile interval.
 func (d *Daemon) SetReconcileInterval(interval time.Duration) {
 	d.reconcileInterval = interval
+}
+
+// SetDebug enables or disables debug logging. When enabled, the
+// supervisor logs the full command, environment variable names, and
+// captures tmux pane output when agents exit.
+func (d *Daemon) SetDebug(debug bool) {
+	d.debug = debug
 }
 
 // AgentStatuses implements api.AgentProvider. It returns the status of
@@ -275,6 +283,7 @@ func (d *Daemon) reconcile(ctx context.Context) {
 		Tmux:    d.tmux,
 		Env:     mergedEnv,
 		Prompt:  prompt,
+		Debug:   d.debug,
 	})
 
 	log.Printf("agentd: reconcile: launching agent harness=%s session=%s", cfg.Harness, cfg.Session)

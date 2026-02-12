@@ -8,6 +8,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +35,7 @@ type Opts struct {
 	Tmux    *tmux.Server
 	Env     map[string]string // merged secrets + agent env
 	Prompt  string            // resolved prompt
+	Debug   bool              // enable verbose debug logging
 }
 
 // Supervisor manages a single agent process lifecycle.
@@ -42,6 +45,7 @@ type Supervisor struct {
 	tmux    *tmux.Server
 	env     map[string]string
 	prompt  string
+	debug   bool
 
 	mu       sync.Mutex
 	running  bool
@@ -59,6 +63,7 @@ func NewSupervisor(opts Opts) *Supervisor {
 		tmux:    opts.Tmux,
 		env:     opts.Env,
 		prompt:  opts.Prompt,
+		debug:   opts.Debug,
 		done:    make(chan struct{}),
 	}
 }
@@ -134,6 +139,18 @@ func (s *Supervisor) Restarts() int {
 // launchAgent creates a tmux session with the agent harness command.
 func (s *Supervisor) launchAgent() error {
 	bin, args := s.harness.BuildCommand(s.prompt)
+
+	if s.debug {
+		if len(args) > 0 {
+			log.Printf("supervisor: [debug] command: %s %s", bin, strings.Join(args, " "))
+		} else {
+			log.Printf("supervisor: [debug] command: %s", bin)
+		}
+		log.Printf("supervisor: [debug] workdir: %s", s.config.Workdir)
+		log.Printf("supervisor: [debug] env keys: %s", envKeys(s.env))
+		log.Printf("supervisor: [debug] tmux socket: %s", s.tmux.SocketPath())
+		log.Printf("supervisor: [debug] tmux session: %s", s.config.Session)
+	}
 
 	opts := tmux.SessionOpts{
 		Name:    s.config.Session,
@@ -296,4 +313,15 @@ func (s *Supervisor) shouldRestart() bool {
 	default:
 		return false
 	}
+}
+
+// envKeys returns a sorted, comma-separated list of environment variable
+// names. Values are omitted because they may contain secrets.
+func envKeys(env map[string]string) string {
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ", ")
 }
