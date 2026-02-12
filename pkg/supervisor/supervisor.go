@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/papercomputeco/agentd/pkg/api"
 	"github.com/papercomputeco/agentd/pkg/config"
 	"github.com/papercomputeco/agentd/pkg/harness"
-	"github.com/papercomputeco/agentd/pkg/stereosd"
 	"github.com/papercomputeco/agentd/pkg/tmux"
 )
 
@@ -28,26 +28,25 @@ const (
 
 // Opts holds configuration for creating a new Supervisor.
 type Opts struct {
-	Config   *config.AgentConfig
-	Harness  harness.Harness
-	Tmux     *tmux.Server
-	Stereosd *stereosd.Client
-	Env      map[string]string // merged secrets + agent env
-	Prompt   string            // resolved prompt
+	Config  *config.AgentConfig
+	Harness harness.Harness
+	Tmux    *tmux.Server
+	Env     map[string]string // merged secrets + agent env
+	Prompt  string            // resolved prompt
 }
 
 // Supervisor manages a single agent process lifecycle.
 type Supervisor struct {
-	config   *config.AgentConfig
-	harness  harness.Harness
-	tmux     *tmux.Server
-	stereosd *stereosd.Client
-	env      map[string]string
-	prompt   string
+	config  *config.AgentConfig
+	harness harness.Harness
+	tmux    *tmux.Server
+	env     map[string]string
+	prompt  string
 
 	mu       sync.Mutex
 	running  bool
 	restarts int
+	lastErr  string
 	cancel   context.CancelFunc
 	done     chan struct{}
 }
@@ -55,13 +54,12 @@ type Supervisor struct {
 // NewSupervisor creates a new supervisor with the given options.
 func NewSupervisor(opts Opts) *Supervisor {
 	return &Supervisor{
-		config:   opts.Config,
-		harness:  opts.Harness,
-		tmux:     opts.Tmux,
-		stereosd: opts.Stereosd,
-		env:      opts.Env,
-		prompt:   opts.Prompt,
-		done:     make(chan struct{}),
+		config:  opts.Config,
+		harness: opts.Harness,
+		tmux:    opts.Tmux,
+		env:     opts.Env,
+		prompt:  opts.Prompt,
+		done:    make(chan struct{}),
 	}
 }
 
@@ -113,15 +111,24 @@ func (s *Supervisor) IsRunning() bool {
 	return s.running
 }
 
-// Status returns the current agent status for reporting to stereosd.
-func (s *Supervisor) Status() stereosd.AgentStatus {
+// Status returns the current agent status suitable for the API.
+func (s *Supervisor) Status() api.AgentStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return stereosd.AgentStatus{
-		Name:    s.harness.Name(),
-		Running: s.running,
-		Session: s.config.Session,
+	return api.AgentStatus{
+		Name:     s.harness.Name(),
+		Running:  s.running,
+		Session:  s.config.Session,
+		Restarts: s.restarts,
+		Error:    s.lastErr,
 	}
+}
+
+// Restarts returns the number of times the agent has been restarted.
+func (s *Supervisor) Restarts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.restarts
 }
 
 // launchAgent creates a tmux session with the agent harness command.
@@ -142,10 +149,8 @@ func (s *Supervisor) launchAgent() error {
 
 	s.mu.Lock()
 	s.running = true
+	s.lastErr = ""
 	s.mu.Unlock()
-
-	// Report running status to stereosd.
-	s.reportStatus()
 
 	log.Printf("supervisor: agent %q launched in tmux session %q", s.harness.Name(), s.config.Session)
 	return nil
@@ -208,7 +213,6 @@ func (s *Supervisor) stopAgent() error {
 	s.running = false
 	s.mu.Unlock()
 
-	s.reportStatus()
 	return nil
 }
 
@@ -236,7 +240,6 @@ func (s *Supervisor) supervisionLoop(ctx context.Context) {
 			s.mu.Unlock()
 
 			log.Printf("supervisor: agent %q exited", s.harness.Name())
-			s.reportStatus()
 
 			// Evaluate restart policy.
 			if !s.shouldRestart() {
@@ -257,7 +260,9 @@ func (s *Supervisor) supervisionLoop(ctx context.Context) {
 
 			if err := s.launchAgent(); err != nil {
 				log.Printf("supervisor: failed to restart agent %q: %v", s.harness.Name(), err)
-				s.reportStatusWithError(err.Error())
+				s.mu.Lock()
+				s.lastErr = err.Error()
+				s.mu.Unlock()
 				return
 			}
 		}
@@ -290,36 +295,5 @@ func (s *Supervisor) shouldRestart() bool {
 
 	default:
 		return false
-	}
-}
-
-// reportStatus sends the current agent status to stereosd.
-func (s *Supervisor) reportStatus() {
-	if s.stereosd == nil {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	status := s.Status()
-	if err := s.stereosd.ReportAgentStatus(ctx, status); err != nil {
-		log.Printf("supervisor: error reporting status to stereosd: %v", err)
-	}
-}
-
-// reportStatusWithError sends an error status to stereosd.
-func (s *Supervisor) reportStatusWithError(errMsg string) {
-	if s.stereosd == nil {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	status := s.Status()
-	status.Error = errMsg
-	if err := s.stereosd.ReportAgentStatus(ctx, status); err != nil {
-		log.Printf("supervisor: error reporting error status to stereosd: %v", err)
 	}
 }
