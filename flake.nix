@@ -1,5 +1,5 @@
 {
-  description = "Tapes - Development environment";
+  description = "agentd - Development environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -23,7 +23,7 @@
           ];
 
           shellHook = ''
-            echo "Tapes development environment"
+            echo "agentd development environment"
             echo ""
             echo "Go version: $(go version)"
             echo ""

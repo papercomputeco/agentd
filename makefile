@@ -7,6 +7,26 @@ build: ## Builds artifact
 	@mkdir -p ./build
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o ./build/agentd
 
+.PHONY: test
+test: ## Runs all tests
+	$(call print-target)
+	go test ./... -v
+
+.PHONY: lint
+lint: ## Runs go vet
+	$(call print-target)
+	go vet ./...
+
+.PHONY: format
+format: ## Formats all Go source files
+	$(call print-target)
+	gofmt -w .
+
+.PHONY: clean
+clean: ## Removes build artifacts
+	$(call print-target)
+	rm -rf ./build
+
 .PHONY: help
 .DEFAULT_GOAL := help
 help: ## Prints this help message
