@@ -174,20 +174,21 @@ var _ = Describe("Server", func() {
 
 	Describe("WaitForExit", func() {
 		It("should return when session exits", func() {
-			// Create a session that exits quickly.
 			err := server.CreateSession(tmux.SessionOpts{
 				Name:    "short-lived",
-				Command: "true", // exits immediately
+				Command: "sleep",
+				Args:    []string{"60"},
 			})
 			Expect(err).NotTo(HaveOccurred())
-
-			// Give tmux a moment to register the session before it exits.
-			time.Sleep(500 * time.Millisecond)
 
 			done := make(chan error, 1)
 			go func() {
 				done <- server.WaitForExit("short-lived", 200*time.Millisecond)
 			}()
+
+			// Destroy the session externally to simulate the session ending.
+			err = server.DestroySession("short-lived")
+			Expect(err).NotTo(HaveOccurred())
 
 			Eventually(done, 5*time.Second).Should(Receive(BeNil()))
 		})

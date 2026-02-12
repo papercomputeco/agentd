@@ -64,7 +64,9 @@ func (s *Server) Stop() error {
 }
 
 // CreateSession creates a new tmux session with the given options.
-// The session runs the specified command with its arguments.
+// The session starts a bare shell, then uses send-keys to type the
+// command into it. This way, if the command exits, the underlying
+// shell (and tmux session) stays alive for inspection or reuse.
 func (s *Server) CreateSession(opts SessionOpts) error {
 	if opts.Name == "" {
 		return fmt.Errorf("session name is required")
@@ -73,8 +75,7 @@ func (s *Server) CreateSession(opts SessionOpts) error {
 		return fmt.Errorf("session command is required")
 	}
 
-	// Build the full shell command string. We use shell execution so that
-	// environment variables and the full command line are properly handled.
+	// Build the full shell command string for send-keys.
 	var shellCmd string
 	if len(opts.Args) > 0 {
 		shellCmd = opts.Command + " " + shelljoin(opts.Args)
@@ -82,7 +83,8 @@ func (s *Server) CreateSession(opts SessionOpts) error {
 		shellCmd = opts.Command
 	}
 
-	args := []string{
+	// Create a bare detached session (starts the default shell).
+	newArgs := []string{
 		"-S", s.socketPath,
 		"new-session",
 		"-d",            // detached
@@ -90,20 +92,34 @@ func (s *Server) CreateSession(opts SessionOpts) error {
 	}
 
 	if opts.Workdir != "" {
-		args = append(args, "-c", opts.Workdir)
+		newArgs = append(newArgs, "-c", opts.Workdir)
 	}
 
 	// Set environment variables via tmux's -e flag (tmux 3.2+).
 	for k, v := range opts.Env {
-		args = append(args, "-e", k+"="+v)
+		newArgs = append(newArgs, "-e", k+"="+v)
 	}
 
-	args = append(args, shellCmd)
-
-	cmd := exec.Command("tmux", args...)
+	cmd := exec.Command("tmux", newArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("creating tmux session %q: %w: %s", opts.Name, err, string(output))
+	}
+
+	// Send the command into the session's shell via send-keys.
+	// The "Enter" literal tells tmux to press the Enter key.
+	sendArgs := []string{
+		"-S", s.socketPath,
+		"send-keys",
+		"-t", opts.Name,
+		shellCmd,
+		"Enter",
+	}
+
+	cmd = exec.Command("tmux", sendArgs...)
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sending command to tmux session %q: %w: %s", opts.Name, err, string(output))
 	}
 
 	return nil

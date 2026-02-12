@@ -16,5 +16,5 @@ func (o *OpenCode) BuildCommand(prompt string) (string, []string) {
 	if prompt == "" {
 		return "opencode", nil
 	}
-	return "opencode", []string{"-m", prompt}
+	return "opencode", []string{"--prompt", prompt}
 }
