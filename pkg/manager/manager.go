@@ -1,8 +1,8 @@
-// Package supervisor manages the lifecycle of an agent process running
+// Package manager manages the lifecycle of an agent process running
 // in a tmux session. It handles starting the agent, monitoring its health,
 // implementing restart policies (no, on-failure, always), enforcing
 // timeouts, and coordinating graceful shutdown.
-package supervisor
+package manager
 
 import (
 	"context"
@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	// defaultPollInterval is how often the supervisor checks if the
+	// defaultPollInterval is how often the manager checks if the
 	// agent's tmux session is still running.
 	defaultPollInterval = 2 * time.Second
 
@@ -28,7 +28,7 @@ const (
 	restartBackoff = 3 * time.Second
 )
 
-// Opts holds configuration for creating a new Supervisor.
+// Opts holds configuration for creating a new Manager.
 type Opts struct {
 	Config  *config.AgentConfig
 	Harness harness.Harness
@@ -38,8 +38,8 @@ type Opts struct {
 	Debug   bool              // enable verbose debug logging
 }
 
-// Supervisor manages a single agent process lifecycle.
-type Supervisor struct {
+// Manager manages a single agent process lifecycle.
+type Manager struct {
 	config  *config.AgentConfig
 	harness harness.Harness
 	tmux    *tmux.Server
@@ -55,9 +55,9 @@ type Supervisor struct {
 	done     chan struct{}
 }
 
-// NewSupervisor creates a new supervisor with the given options.
-func NewSupervisor(opts Opts) *Supervisor {
-	return &Supervisor{
+// NewManager creates a new manager with the given options.
+func NewManager(opts Opts) *Manager {
+	return &Manager{
 		config:  opts.Config,
 		harness: opts.Harness,
 		tmux:    opts.Tmux,
@@ -68,10 +68,10 @@ func NewSupervisor(opts Opts) *Supervisor {
 	}
 }
 
-// Start launches the agent and begins the supervision loop. It runs
+// Start launches the agent and begins the run loop. It runs
 // until the context is cancelled or the agent exits and the restart
 // policy does not call for a restart.
-func (s *Supervisor) Start(ctx context.Context) error {
+func (s *Manager) Start(ctx context.Context) error {
 	ctx, s.cancel = context.WithCancel(ctx)
 
 	// Apply timeout if configured.
@@ -88,36 +88,34 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		return fmt.Errorf("launching agent: %w", err)
 	}
 
-	// Start the supervision loop in a goroutine.
-	go s.supervisionLoop(ctx)
-
+	go s.run(ctx)
 	return nil
 }
 
 // Stop gracefully stops the agent. It sends SIGINT (C-c) to the tmux
 // session, waits the grace period, and then forcibly destroys the session.
-func (s *Supervisor) Stop() error {
+func (s *Manager) Stop() error {
 	s.mu.Lock()
 	if s.cancel != nil {
 		s.cancel()
 	}
 	s.mu.Unlock()
 
-	// Wait for the supervision loop to finish.
+	// Wait for the run loop to finish.
 	<-s.done
 
 	return s.stopAgent()
 }
 
 // IsRunning returns whether the agent process is currently running.
-func (s *Supervisor) IsRunning() bool {
+func (s *Manager) IsRunning() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.running
 }
 
 // Status returns the current agent status suitable for the API.
-func (s *Supervisor) Status() api.AgentStatus {
+func (s *Manager) Status() api.AgentStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return api.AgentStatus{
@@ -130,26 +128,26 @@ func (s *Supervisor) Status() api.AgentStatus {
 }
 
 // Restarts returns the number of times the agent has been restarted.
-func (s *Supervisor) Restarts() int {
+func (s *Manager) Restarts() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.restarts
 }
 
 // launchAgent creates a tmux session with the agent harness command.
-func (s *Supervisor) launchAgent() error {
+func (s *Manager) launchAgent() error {
 	bin, args := s.harness.BuildCommand(s.prompt)
 
 	if s.debug {
 		if len(args) > 0 {
-			log.Printf("supervisor: [debug] command: %s %s", bin, strings.Join(args, " "))
+			log.Printf("manager: [debug] command: %s %s", bin, strings.Join(args, " "))
 		} else {
-			log.Printf("supervisor: [debug] command: %s", bin)
+			log.Printf("manager: [debug] command: %s", bin)
 		}
-		log.Printf("supervisor: [debug] workdir: %s", s.config.Workdir)
-		log.Printf("supervisor: [debug] env keys: %s", envKeys(s.env))
-		log.Printf("supervisor: [debug] tmux socket: %s", s.tmux.SocketPath())
-		log.Printf("supervisor: [debug] tmux session: %s", s.config.Session)
+		log.Printf("manager: [debug] workdir: %s", s.config.Workdir)
+		log.Printf("manager: [debug] env keys: %s", envKeys(s.env))
+		log.Printf("manager: [debug] tmux socket: %s", s.tmux.SocketPath())
+		log.Printf("manager: [debug] tmux session: %s", s.config.Session)
 	}
 
 	opts := tmux.SessionOpts{
@@ -169,12 +167,12 @@ func (s *Supervisor) launchAgent() error {
 	s.lastErr = ""
 	s.mu.Unlock()
 
-	log.Printf("supervisor: agent %q launched in tmux session %q", s.harness.Name(), s.config.Session)
+	log.Printf("manager: agent %q launched in tmux session %q", s.harness.Name(), s.config.Session)
 	return nil
 }
 
 // stopAgent gracefully stops the running agent.
-func (s *Supervisor) stopAgent() error {
+func (s *Manager) stopAgent() error {
 	s.mu.Lock()
 	wasRunning := s.running
 	s.mu.Unlock()
@@ -188,7 +186,7 @@ func (s *Supervisor) stopAgent() error {
 	// Check if the session is still actually running.
 	running, err := s.tmux.IsSessionRunning(sessionName)
 	if err != nil {
-		log.Printf("supervisor: error checking session %q: %v", sessionName, err)
+		log.Printf("manager: error checking session %q: %v", sessionName, err)
 	}
 	if !running {
 		s.mu.Lock()
@@ -202,11 +200,11 @@ func (s *Supervisor) stopAgent() error {
 		grace = 30 * time.Second
 	}
 
-	log.Printf("supervisor: sending C-c to agent session %q, grace period %s", sessionName, grace)
+	log.Printf("manager: sending C-c to agent session %q, grace period %s", sessionName, grace)
 
 	// Send C-c (SIGINT) to the tmux session.
 	if err := s.tmux.SendKeys(sessionName, "C-c"); err != nil {
-		log.Printf("supervisor: error sending C-c to session %q: %v", sessionName, err)
+		log.Printf("manager: error sending C-c to session %q: %v", sessionName, err)
 	}
 
 	// Wait for the session to exit within the grace period.
@@ -218,11 +216,11 @@ func (s *Supervisor) stopAgent() error {
 
 	select {
 	case <-exitCh:
-		log.Printf("supervisor: agent session %q exited gracefully", sessionName)
+		log.Printf("manager: agent session %q exited gracefully", sessionName)
 	case <-time.After(grace):
-		log.Printf("supervisor: grace period expired, destroying session %q", sessionName)
+		log.Printf("manager: grace period expired, destroying session %q", sessionName)
 		if err := s.tmux.DestroySession(sessionName); err != nil {
-			log.Printf("supervisor: error destroying session %q: %v", sessionName, err)
+			log.Printf("manager: error destroying session %q: %v", sessionName, err)
 		}
 	}
 
@@ -233,9 +231,9 @@ func (s *Supervisor) stopAgent() error {
 	return nil
 }
 
-// supervisionLoop monitors the agent and handles restarts per the
+// run monitors the agent and handles restarts per the
 // configured restart policy.
-func (s *Supervisor) supervisionLoop(ctx context.Context) {
+func (s *Manager) run(ctx context.Context) {
 	defer close(s.done)
 
 	for {
@@ -256,17 +254,17 @@ func (s *Supervisor) supervisionLoop(ctx context.Context) {
 			s.running = false
 			s.mu.Unlock()
 
-			log.Printf("supervisor: agent %q exited", s.harness.Name())
+			log.Printf("manager: agent %q exited", s.harness.Name())
 
 			// Evaluate restart policy.
 			if !s.shouldRestart() {
-				log.Printf("supervisor: not restarting agent %q (policy=%s, restarts=%d)",
+				log.Printf("manager: not restarting agent %q (policy=%s, restarts=%d)",
 					s.harness.Name(), s.config.Restart, s.restarts)
 				return
 			}
 
 			s.restarts++
-			log.Printf("supervisor: restarting agent %q (attempt %d)", s.harness.Name(), s.restarts)
+			log.Printf("manager: restarting agent %q (attempt %d)", s.harness.Name(), s.restarts)
 
 			// Backoff before restart.
 			select {
@@ -276,7 +274,7 @@ func (s *Supervisor) supervisionLoop(ctx context.Context) {
 			}
 
 			if err := s.launchAgent(); err != nil {
-				log.Printf("supervisor: failed to restart agent %q: %v", s.harness.Name(), err)
+				log.Printf("manager: failed to restart agent %q: %v", s.harness.Name(), err)
 				s.mu.Lock()
 				s.lastErr = err.Error()
 				s.mu.Unlock()
@@ -288,7 +286,7 @@ func (s *Supervisor) supervisionLoop(ctx context.Context) {
 
 // shouldRestart evaluates whether the agent should be restarted based
 // on the configured restart policy and restart count.
-func (s *Supervisor) shouldRestart() bool {
+func (s *Manager) shouldRestart() bool {
 	switch s.config.Restart {
 	case config.RestartNo:
 		return false

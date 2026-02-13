@@ -1,4 +1,4 @@
-package supervisor_test
+package manager_test
 
 import (
 	"testing"
@@ -8,17 +8,17 @@ import (
 
 	"github.com/papercomputeco/agentd/pkg/config"
 	"github.com/papercomputeco/agentd/pkg/harness"
-	"github.com/papercomputeco/agentd/pkg/supervisor"
+	"github.com/papercomputeco/agentd/pkg/manager"
 )
 
-func TestSupervisor(t *testing.T) {
+func TestManager(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Supervisor Suite")
+	RunSpecs(t, "Manager Suite")
 }
 
-var _ = Describe("Supervisor", func() {
-	Describe("NewSupervisor", func() {
-		It("should create a new supervisor", func() {
+var _ = Describe("Manager", func() {
+	Describe("NewManager", func() {
+		It("should create a new manager", func() {
 			h, err := harness.Get("claude-code")
 			Expect(err).NotTo(HaveOccurred())
 
@@ -30,15 +30,15 @@ var _ = Describe("Supervisor", func() {
 				Session:     "claude-code",
 			}
 
-			sup := supervisor.NewSupervisor(supervisor.Opts{
+			m := manager.NewManager(manager.Opts{
 				Config:  cfg,
 				Harness: h,
 				Env:     map[string]string{"FOO": "bar"},
 				Prompt:  "test prompt",
 			})
 
-			Expect(sup).NotTo(BeNil())
-			Expect(sup.IsRunning()).To(BeFalse())
+			Expect(m).NotTo(BeNil())
+			Expect(m.IsRunning()).To(BeFalse())
 		})
 	})
 
@@ -55,12 +55,12 @@ var _ = Describe("Supervisor", func() {
 				Session:     "opencode",
 			}
 
-			sup := supervisor.NewSupervisor(supervisor.Opts{
+			m := manager.NewManager(manager.Opts{
 				Config:  cfg,
 				Harness: h,
 			})
 
-			status := sup.Status()
+			status := m.Status()
 			Expect(status.Name).To(Equal("opencode"))
 			Expect(status.Running).To(BeFalse())
 			Expect(status.Session).To(Equal("opencode"))
@@ -82,12 +82,12 @@ var _ = Describe("Supervisor", func() {
 				Session:     "claude-code",
 			}
 
-			sup := supervisor.NewSupervisor(supervisor.Opts{
+			m := manager.NewManager(manager.Opts{
 				Config:  cfg,
 				Harness: h,
 			})
 
-			Expect(sup.Restarts()).To(Equal(0))
+			Expect(m.Restarts()).To(Equal(0))
 		})
 	})
 })

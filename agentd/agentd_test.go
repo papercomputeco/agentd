@@ -28,7 +28,7 @@ var _ = Describe("Daemon", func() {
 	})
 
 	Describe("AgentStatuses", func() {
-		It("should return nil when no supervisor is running", func() {
+		It("should return nil when no manager is running", func() {
 			d := agentd.NewDaemon("")
 			statuses := d.AgentStatuses()
 			Expect(statuses).To(BeNil())

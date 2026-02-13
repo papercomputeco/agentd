@@ -28,8 +28,8 @@ import (
 	"github.com/papercomputeco/agentd/pkg/api"
 	"github.com/papercomputeco/agentd/pkg/config"
 	"github.com/papercomputeco/agentd/pkg/harness"
+	"github.com/papercomputeco/agentd/pkg/manager"
 	"github.com/papercomputeco/agentd/pkg/secrets"
-	"github.com/papercomputeco/agentd/pkg/supervisor"
 	"github.com/papercomputeco/agentd/pkg/tmux"
 )
 
@@ -53,7 +53,7 @@ const (
 // Daemon is the agent daemon. It runs a reconciliation loop that
 // watches for configuration and secret changes, serves an API for
 // external consumers to pull agent state, and manages agent harnesses
-// in tmux sessions via a supervisor.
+// in tmux sessions via a manager.
 type Daemon struct {
 	configPath        string
 	secretDir         string
@@ -63,10 +63,10 @@ type Daemon struct {
 	debug             bool
 
 	// runtime state, guarded by mu
-	mu         sync.Mutex
-	supervisor *supervisor.Supervisor
-	tmux       *tmux.Server
-	apiServer  *api.Server
+	mu        sync.Mutex
+	manager   *manager.Manager
+	tmux      *tmux.Server
+	apiServer *api.Server
 
 	// lastConfigHash and lastSecretHash track whether config/secrets
 	// have changed since the last reconciliation.
@@ -111,7 +111,7 @@ func (d *Daemon) SetReconcileInterval(interval time.Duration) {
 }
 
 // SetDebug enables or disables debug logging. When enabled, the
-// supervisor logs the full command, environment variable names, and
+// manager logs the full command, environment variable names, and
 // captures tmux pane output when agents exit.
 func (d *Daemon) SetDebug(debug bool) {
 	d.debug = debug
@@ -123,11 +123,11 @@ func (d *Daemon) AgentStatuses() []api.AgentStatus {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.supervisor == nil {
+	if d.manager == nil {
 		return nil
 	}
 
-	return []api.AgentStatus{d.supervisor.Status()}
+	return []api.AgentStatus{d.manager.Status()}
 }
 
 // Run starts the agentd daemon and blocks until the context is cancelled.
@@ -136,7 +136,7 @@ func (d *Daemon) AgentStatuses() []api.AgentStatus {
 //  1. Start the tmux server
 //  2. Start the API server
 //  3. Run the reconciliation loop (reads config + secrets, converges)
-//  4. On shutdown: stop supervisor, stop API, stop tmux
+//  4. On shutdown: stop manager, stop API, stop tmux
 func (d *Daemon) Run(ctx context.Context) error {
 	log.Println("agentd: initializing agent manager")
 
@@ -171,7 +171,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// 4. Graceful shutdown.
 	log.Println("agentd: shutting down")
 	d.mu.Lock()
-	sup := d.supervisor
+	sup := d.manager
 	d.mu.Unlock()
 
 	if sup != nil {
@@ -236,20 +236,20 @@ func (d *Daemon) reconcile(ctx context.Context) {
 
 	d.mu.Lock()
 	changed := configHash != d.lastConfigHash || secretHash != d.lastSecretHash
-	hasSupervisor := d.supervisor != nil
+	hasmanager := d.manager != nil
 	d.mu.Unlock()
 
-	if !changed && hasSupervisor {
+	if !changed && hasmanager {
 		// No changes and agent is already running — nothing to do.
 		return
 	}
 
-	// If the desired state changed and we have a running supervisor, stop it.
-	if changed && hasSupervisor {
+	// If the desired state changed and we have a running manager, stop it.
+	if changed && hasmanager {
 		log.Println("agentd: reconcile: config or secrets changed, restarting agent")
 		d.mu.Lock()
-		sup := d.supervisor
-		d.supervisor = nil
+		sup := d.manager
+		d.manager = nil
 		d.mu.Unlock()
 
 		if err := sup.Stop(); err != nil {
@@ -276,8 +276,8 @@ func (d *Daemon) reconcile(ctx context.Context) {
 	maps.Copy(mergedEnv, secretEnv)
 	maps.Copy(mergedEnv, cfg.Env)
 
-	// Create and start supervisor.
-	sup := supervisor.NewSupervisor(supervisor.Opts{
+	// Create and start manager.
+	sup := manager.NewManager(manager.Opts{
 		Config:  cfg,
 		Harness: h,
 		Tmux:    d.tmux,
@@ -293,7 +293,7 @@ func (d *Daemon) reconcile(ctx context.Context) {
 	}
 
 	d.mu.Lock()
-	d.supervisor = sup
+	d.manager = sup
 	d.lastConfigHash = configHash
 	d.lastSecretHash = secretHash
 	d.mu.Unlock()
