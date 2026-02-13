@@ -1,9 +1,9 @@
 package harness
 
 // OpenCode implements the Harness interface for the OpenCode CLI.
-// OpenCode accepts a prompt with the -m flag:
+// OpenCode accepts a prompt with the --prompt flag:
 //
-//	opencode -m "review the code and fix tests"
+//	opencode --prompt "review the code and fix tests"
 type OpenCode struct{}
 
 // Name returns "opencode".

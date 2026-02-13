@@ -88,7 +88,7 @@ var _ = Describe("Harness", func() {
 		It("should build command with prompt", func() {
 			bin, args := h.BuildCommand("review code")
 			Expect(bin).To(Equal("opencode"))
-			Expect(args).To(Equal([]string{"-m", "review code"}))
+			Expect(args).To(Equal([]string{"--prompt", "review code"}))
 		})
 
 		It("should build command without prompt", func() {
