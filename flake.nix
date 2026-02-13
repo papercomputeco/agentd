@@ -18,8 +18,14 @@
             pkgs.go_1_25
             pkgs.gotools
 
+            # agentd testing requires tmux
+            pkgs.tmux
+
             # Build tools
             pkgs.gnumake
+
+            # Test tools
+            pkgs.hurl
           ];
 
           shellHook = ''
