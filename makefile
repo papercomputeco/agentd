@@ -22,6 +22,11 @@ format: ## Formats all Go source files
 	$(call print-target)
 	gofmt -w .
 
+.PHONY: nix-build
+nix-build: ## Builds the Nix package for the current system
+	$(call print-target)
+	nix build --out-link ./build/result
+
 .PHONY: clean
 clean: ## Removes build artifacts
 	$(call print-target)
