@@ -41,6 +41,12 @@
               description = "Agent Daemon";
               wantedBy = [ "multi-user.target" ];
               after = [ "network.target" ];
+
+              # agentd shells out to tmux for agent session management.
+              # We include tmux here on the systemd's path to ensure during boot
+              # agentd can start the tmux server.
+              path = [ pkgs.tmux ];
+
               serviceConfig = {
                 ExecStart = "${cfg.package}/bin/agentd ${lib.escapeShellArgs cfg.extraArgs}";
                 Restart = "always";
