@@ -42,12 +42,26 @@ type SessionOpts struct {
 // keeping agentd's tmux sessions isolated from user tmux sessions.
 type Server struct {
 	socketPath string
+
+	// runAs, when non-empty, causes all tmux commands to be executed
+	// as this user via "sudo -u <runAs>". This ensures the tmux server
+	// process and socket are owned by the target user (e.g., "agent"),
+	// which is required because tmux enforces UID-based ownership
+	// checks on socket connections.
+	runAs string
 }
 
 // NewServer creates a new tmux server manager. The socketPath is the path
 // to the tmux server socket (e.g., "/run/stereos/agentd-tmux.sock").
 func NewServer(socketPath string) *Server {
 	return &Server{socketPath: socketPath}
+}
+
+// NewServerAs creates a new tmux server manager that runs all tmux
+// commands as the specified user via sudo. This is needed because tmux
+// enforces that only the socket owner UID can connect to the server.
+func NewServerAs(socketPath, runAs string) *Server {
+	return &Server{socketPath: socketPath, runAs: runAs}
 }
 
 // SocketPath returns the tmux server socket path.
@@ -67,7 +81,7 @@ func (s *Server) Start() error {
 
 // Stop kills the tmux server and all its sessions.
 func (s *Server) Stop() error {
-	cmd := exec.Command("tmux", "-S", s.socketPath, "kill-server")
+	cmd := s.tmuxCmd("-S", s.socketPath, "kill-server")
 	// Ignore errors — the server may already be stopped.
 	_ = cmd.Run()
 	return nil
@@ -110,15 +124,16 @@ func (s *Server) CreateSession(opts SessionOpts) error {
 		newArgs = append(newArgs, "-e", k+"="+v)
 	}
 
-	cmd := exec.Command("tmux", newArgs...)
+	cmd := s.tmuxCmd(newArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("creating tmux session %q: %w: %s", opts.Name, err, string(output))
 	}
 
 	// Fix socket permissions so admin group members can attach to sessions.
-	// tmux creates the socket with restrictive permissions (0700); we open
-	// it to the admin group. Non-fatal if the group doesn't exist.
+	// tmux enforces UID-based ownership checks, so admin must use
+	// "sudo tmux -S ... attach" to connect. The chmod/chown ensures the
+	// socket is at least filesystem-accessible to the admin group.
 	s.fixSocketPermissions()
 
 	// Send the command into the session's shell via send-keys.
@@ -131,7 +146,7 @@ func (s *Server) CreateSession(opts SessionOpts) error {
 		"Enter",
 	}
 
-	cmd = exec.Command("tmux", sendArgs...)
+	cmd = s.tmuxCmd(sendArgs...)
 	output, err = cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("sending command to tmux session %q: %w: %s", opts.Name, err, string(output))
@@ -142,7 +157,7 @@ func (s *Server) CreateSession(opts SessionOpts) error {
 
 // DestroySession kills a tmux session by name.
 func (s *Server) DestroySession(name string) error {
-	cmd := exec.Command("tmux", "-S", s.socketPath, "kill-session", "-t", name)
+	cmd := s.tmuxCmd("-S", s.socketPath, "kill-session", "-t", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("destroying tmux session %q: %w: %s", name, err, string(output))
@@ -152,7 +167,7 @@ func (s *Server) DestroySession(name string) error {
 
 // ListSessions returns the names of all active tmux sessions.
 func (s *Server) ListSessions() ([]string, error) {
-	cmd := exec.Command("tmux", "-S", s.socketPath, "list-sessions", "-F", "#{session_name}")
+	cmd := s.tmuxCmd("-S", s.socketPath, "list-sessions", "-F", "#{session_name}")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		outStr := string(output)
@@ -177,7 +192,7 @@ func (s *Server) ListSessions() ([]string, error) {
 
 // IsSessionRunning checks if a tmux session with the given name exists.
 func (s *Server) IsSessionRunning(name string) (bool, error) {
-	cmd := exec.Command("tmux", "-S", s.socketPath, "has-session", "-t", name)
+	cmd := s.tmuxCmd("-S", s.socketPath, "has-session", "-t", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		outStr := string(output)
@@ -218,12 +233,24 @@ func (s *Server) WaitForExit(name string, pollInterval time.Duration) error {
 // SendKeys sends keystrokes to a tmux session. This is used to send
 // signals like C-c (SIGINT) to the running process.
 func (s *Server) SendKeys(name string, keys string) error {
-	cmd := exec.Command("tmux", "-S", s.socketPath, "send-keys", "-t", name, keys)
+	cmd := s.tmuxCmd("-S", s.socketPath, "send-keys", "-t", name, keys)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("sending keys to tmux session %q: %w: %s", name, err, string(output))
 	}
 	return nil
+}
+
+// tmuxCmd builds an exec.Cmd for a tmux invocation. When s.runAs is set,
+// the command is wrapped in "sudo -u <runAs> --" so the tmux process
+// runs as the target user.
+func (s *Server) tmuxCmd(args ...string) *exec.Cmd {
+	if s.runAs != "" {
+		sudoArgs := []string{"-u", s.runAs, "--", "tmux"}
+		sudoArgs = append(sudoArgs, args...)
+		return exec.Command("sudo", sudoArgs...)
+	}
+	return exec.Command("tmux", args...)
 }
 
 // fixSocketPermissions sets the tmux socket to mode 0770 with admin group

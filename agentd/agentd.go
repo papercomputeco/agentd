@@ -48,6 +48,11 @@ const (
 
 	// DefaultReconcileInterval is how often the reconciliation loop ticks.
 	DefaultReconcileInterval = 5 * time.Second
+
+	// AgentUser is the unprivileged user that agent harnesses run as.
+	// tmux sessions are launched as this user so the processes execute
+	// with agent-level (not root) privileges.
+	AgentUser = "agent"
 )
 
 // Daemon is the agent daemon. It runs a reconciliation loop that
@@ -141,8 +146,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	log.Println("agentd: initializing agent manager")
 
 	// 1. Start tmux server.
-	log.Println("agentd: starting tmux server")
-	d.tmux = tmux.NewServer(d.tmuxSocketPath)
+	// Run tmux as the agent user so sessions execute with agent-level
+	// privileges and the socket is owned by agent (tmux enforces UID
+	// ownership checks on socket connections).
+	log.Printf("agentd: starting tmux server (run-as=%s)", AgentUser)
+	d.tmux = tmux.NewServerAs(d.tmuxSocketPath, AgentUser)
 	if err := d.tmux.Start(); err != nil {
 		return fmt.Errorf("starting tmux server: %w", err)
 	}
