@@ -5,9 +5,19 @@ package tmux
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"os/exec"
+	"os/user"
+	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	// adminGroup is the group that gets access to the tmux socket,
+	// matching the StereOS admin group convention.
+	adminGroup = "admin"
 )
 
 // SessionOpts configures a new tmux session.
@@ -105,6 +115,11 @@ func (s *Server) CreateSession(opts SessionOpts) error {
 	if err != nil {
 		return fmt.Errorf("creating tmux session %q: %w: %s", opts.Name, err, string(output))
 	}
+
+	// Fix socket permissions so admin group members can attach to sessions.
+	// tmux creates the socket with restrictive permissions (0700); we open
+	// it to the admin group. Non-fatal if the group doesn't exist.
+	s.fixSocketPermissions()
 
 	// Send the command into the session's shell via send-keys.
 	// The "Enter" literal tells tmux to press the Enter key.
@@ -207,6 +222,35 @@ func (s *Server) SendKeys(name string, keys string) error {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("sending keys to tmux session %q: %w: %s", name, err, string(output))
+	}
+	return nil
+}
+
+// fixSocketPermissions sets the tmux socket to mode 0770 with admin group
+// ownership so admin users can attach to agent sessions.
+func (s *Server) fixSocketPermissions() {
+	if err := os.Chmod(s.socketPath, 0770); err != nil {
+		log.Printf("tmux: warning: chmod %s: %v", s.socketPath, err)
+		return
+	}
+	if err := chownToGroup(s.socketPath, adminGroup); err != nil {
+		log.Printf("tmux: warning: chown %s to group %s: %v", s.socketPath, adminGroup, err)
+	}
+}
+
+// chownToGroup sets the group ownership of a file to the named group,
+// keeping the current owner unchanged.
+func chownToGroup(path, groupName string) error {
+	grp, err := user.LookupGroup(groupName)
+	if err != nil {
+		return fmt.Errorf("lookup group %s: %w", groupName, err)
+	}
+	gid, err := strconv.Atoi(grp.Gid)
+	if err != nil {
+		return fmt.Errorf("parse gid %s: %w", grp.Gid, err)
+	}
+	if err := os.Chown(path, -1, gid); err != nil {
+		return fmt.Errorf("chown %s: %w", path, err)
 	}
 	return nil
 }

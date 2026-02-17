@@ -16,8 +16,16 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
+	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	// adminGroup is the group that gets read/write access to the agentd
+	// API socket, matching the StereOS admin group convention.
+	adminGroup = "admin"
 )
 
 // AgentStatus describes the runtime state of a single agent harness.
@@ -83,6 +91,14 @@ func (s *Server) Start() error {
 	}
 	s.listener = ln
 
+	// Set socket permissions so admin group members can query agent status.
+	if err := os.Chmod(s.socketPath, 0660); err != nil {
+		log.Printf("api: warning: chmod %s: %v", s.socketPath, err)
+	}
+	if err := chownToGroup(s.socketPath, adminGroup); err != nil {
+		log.Printf("api: warning: chown %s to group %s: %v", s.socketPath, adminGroup, err)
+	}
+
 	go func() {
 		if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("api: server error: %v", err)
@@ -134,4 +150,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// chownToGroup sets the group ownership of a file to the named group,
+// keeping the current owner unchanged.
+func chownToGroup(path, groupName string) error {
+	grp, err := user.LookupGroup(groupName)
+	if err != nil {
+		return fmt.Errorf("lookup group %s: %w", groupName, err)
+	}
+	gid, err := strconv.Atoi(grp.Gid)
+	if err != nil {
+		return fmt.Errorf("parse gid %s: %w", grp.Gid, err)
+	}
+	if err := os.Chown(path, -1, gid); err != nil {
+		return fmt.Errorf("chown %s: %w", path, err)
+	}
+	return nil
 }
