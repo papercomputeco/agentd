@@ -38,7 +38,9 @@ const (
 	SecretDir = "/run/stereos/secrets"
 
 	// TmuxSocketPath is the dedicated tmux server socket for agentd sessions.
-	TmuxSocketPath = "/run/stereos/agentd-tmux.sock"
+	// Lives under /run/agentd/ (owned by agent:admin) rather than /run/stereos/
+	// (owned by root:admin) so the agent user can create and own the socket.
+	TmuxSocketPath = "/run/agentd/tmux.sock"
 
 	// DefaultConfigPath is the default location for the jcard.toml config.
 	DefaultConfigPath = "/etc/stereos/jcard.toml"

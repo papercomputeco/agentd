@@ -59,7 +59,7 @@ var _ = Describe("Daemon", func() {
 		})
 
 		It("should reference the correct tmux socket path", func() {
-			Expect(agentd.TmuxSocketPath).To(Equal("/run/stereos/agentd-tmux.sock"))
+			Expect(agentd.TmuxSocketPath).To(Equal("/run/agentd/tmux.sock"))
 		})
 
 		It("should reference the correct default config path", func() {
