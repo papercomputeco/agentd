@@ -26,7 +26,7 @@ harness = "claude-code"
 			cfg, err := config.ParseConfig(toml)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cfg.Harness).To(Equal("claude-code"))
-			Expect(cfg.Workdir).To(Equal("/workspace"))
+			Expect(cfg.Workdir).To(Equal("/home/agent/workspace"))
 			Expect(cfg.Restart).To(Equal(config.RestartNo))
 			Expect(cfg.GracePeriod).To(Equal("30s"))
 			Expect(cfg.Session).To(Equal("claude-code"))
