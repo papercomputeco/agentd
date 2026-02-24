@@ -27,7 +27,7 @@ const (
 
 const (
 	// DefaultWorkdir is the default working directory for agents.
-	DefaultWorkdir = "/workspace"
+	DefaultWorkdir = "/home/agent/workspace"
 
 	// DefaultGracePeriod is the default SIGTERM-to-SIGKILL grace period.
 	DefaultGracePeriod = "30s"
@@ -59,7 +59,7 @@ type AgentConfig struct {
 	PromptFile string `toml:"prompt_file,omitempty"`
 
 	// Workdir is the working directory inside the sandbox where the agent starts.
-	// Defaults to /workspace.
+	// Defaults to /home/agent/workspace.
 	Workdir string `toml:"workdir,omitempty"`
 
 	// Restart defines the restart policy for the agent.

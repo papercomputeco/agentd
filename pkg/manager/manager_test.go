@@ -24,7 +24,7 @@ var _ = Describe("Manager", func() {
 
 			cfg := &config.AgentConfig{
 				Harness:     "claude-code",
-				Workdir:     "/workspace",
+				Workdir:     "/home/agent/workspace",
 				Restart:     config.RestartNo,
 				GracePeriod: "30s",
 				Session:     "claude-code",
@@ -49,7 +49,7 @@ var _ = Describe("Manager", func() {
 
 			cfg := &config.AgentConfig{
 				Harness:     "opencode",
-				Workdir:     "/workspace",
+				Workdir:     "/home/agent/workspace",
 				Restart:     config.RestartNo,
 				GracePeriod: "30s",
 				Session:     "opencode",
@@ -76,7 +76,7 @@ var _ = Describe("Manager", func() {
 
 			cfg := &config.AgentConfig{
 				Harness:     "claude-code",
-				Workdir:     "/workspace",
+				Workdir:     "/home/agent/workspace",
 				Restart:     config.RestartNo,
 				GracePeriod: "30s",
 				Session:     "claude-code",

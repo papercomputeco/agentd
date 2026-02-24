@@ -57,7 +57,7 @@ The `[agent]` key in a `jcard.toml`
 [agent]
 harness = "claude-code"
 prompt = "review the code and fix failing tests"
-workdir = "/workspace"
+workdir = "/home/agent/workspace"
 restart = "on-failure"
 max_restarts = 5
 timeout = "2h"
