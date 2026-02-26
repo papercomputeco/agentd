@@ -5,10 +5,24 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
+)
+
+// AgentType defines how the agent process is executed.
+type AgentType string
+
+const (
+	// AgentTypeSandboxed runs the agent in a gVisor (runsc) sandbox with
+	// read-only /nix/store bind mounts and a writable tmpfs overlay.
+	AgentTypeSandboxed AgentType = "sandboxed"
+
+	// AgentTypeNative runs the agent directly on the host in a tmux
+	// session as the agent user (the original agentd behavior).
+	AgentTypeNative AgentType = "native"
 )
 
 // RestartPolicy defines the agent restart behavior.
@@ -34,6 +48,15 @@ const (
 
 	// DefaultRestart is the default restart policy.
 	DefaultRestart = RestartNo
+
+	// DefaultAgentType is the default agent execution mode.
+	DefaultAgentType = AgentTypeSandboxed
+
+	// DefaultMemory is the default memory limit for sandboxed agents.
+	DefaultMemory = "2GiB"
+
+	// DefaultPidLimit is the default PID limit for sandboxed agents.
+	DefaultPidLimit = 512
 )
 
 // harnessSet are the built-in harnesses.
@@ -46,6 +69,11 @@ var harnessSet = map[string]bool{
 
 // AgentConfig represents the [agent] section of a jcard.toml file.
 type AgentConfig struct {
+	// Type selects the agent execution mode.
+	// "sandboxed" (default) runs in a gVisor container with /nix/store sharing.
+	// "native" runs directly on the host in a tmux session.
+	Type AgentType `toml:"type,omitempty"`
+
 	// Harness is the agent harness to use.
 	// Built-in harnesses: "claude-code", "opencode", "gemini-cli", "custom".
 	Harness string `toml:"harness"`
@@ -79,8 +107,22 @@ type AgentConfig struct {
 	GracePeriod string `toml:"grace_period,omitempty"`
 
 	// Session is the tmux session name for this agent.
-	// Defaults to the harness name.
+	// Defaults to the harness name. Only used for native agents.
 	Session string `toml:"session,omitempty"`
+
+	// Memory is the memory limit for sandboxed agents (e.g. "2GiB", "512MiB").
+	// Ignored for native agents. Defaults to "2GiB".
+	Memory string `toml:"memory,omitempty"`
+
+	// PidLimit is the maximum number of processes inside a sandboxed agent.
+	// Ignored for native agents. Defaults to 512.
+	PidLimit int `toml:"pid_limit,omitempty"`
+
+	// ExtraPackages is a list of additional Nix package attribute names
+	// to install into the sandbox (e.g. ["ripgrep", "fd", "python311"]).
+	// These are resolved against the system's nixpkgs and materialized
+	// into /nix/store at agent launch time. Only used for sandboxed agents.
+	ExtraPackages []string `toml:"extra_packages,omitempty"`
 
 	// Env holds environment variables set only for the agent process.
 	Env map[string]string `toml:"env,omitempty"`
@@ -123,6 +165,9 @@ func ParseConfig(content string) (*AgentConfig, error) {
 
 // applyDefaults fills in default values for unset fields.
 func (c *AgentConfig) applyDefaults() {
+	if c.Type == "" {
+		c.Type = DefaultAgentType
+	}
 	if c.Workdir == "" {
 		c.Workdir = DefaultWorkdir
 	}
@@ -135,6 +180,14 @@ func (c *AgentConfig) applyDefaults() {
 	if c.Session == "" {
 		c.Session = c.Harness
 	}
+	if c.Type == AgentTypeSandboxed {
+		if c.Memory == "" {
+			c.Memory = DefaultMemory
+		}
+		if c.PidLimit == 0 {
+			c.PidLimit = DefaultPidLimit
+		}
+	}
 	if c.Env == nil {
 		c.Env = make(map[string]string)
 	}
@@ -142,6 +195,13 @@ func (c *AgentConfig) applyDefaults() {
 
 // Validate checks the configuration for errors.
 func (c *AgentConfig) Validate() error {
+	switch c.Type {
+	case AgentTypeSandboxed, AgentTypeNative:
+		// valid
+	default:
+		return fmt.Errorf("invalid agent.type %q: must be sandboxed or native", c.Type)
+	}
+
 	if c.Harness == "" {
 		return fmt.Errorf("agent.harness is required")
 	}
@@ -170,6 +230,28 @@ func (c *AgentConfig) Validate() error {
 		if _, err := time.ParseDuration(c.GracePeriod); err != nil {
 			return fmt.Errorf("invalid agent.grace_period %q: %w", c.GracePeriod, err)
 		}
+	}
+
+	// Sandbox-specific validation.
+	if c.Type == AgentTypeSandboxed {
+		if c.Memory != "" {
+			if _, err := ParseMemory(c.Memory); err != nil {
+				return fmt.Errorf("invalid agent.memory %q: %w", c.Memory, err)
+			}
+		}
+		if c.PidLimit < 0 {
+			return fmt.Errorf("agent.pid_limit must be >= 0, got %d", c.PidLimit)
+		}
+		for i, pkg := range c.ExtraPackages {
+			if strings.TrimSpace(pkg) == "" {
+				return fmt.Errorf("agent.extra_packages[%d] is empty", i)
+			}
+		}
+	}
+
+	// extra_packages is only valid for sandboxed agents.
+	if c.Type != AgentTypeSandboxed && len(c.ExtraPackages) > 0 {
+		return fmt.Errorf("agent.extra_packages is only supported for type=sandboxed")
 	}
 
 	return nil
@@ -204,4 +286,71 @@ func (c *AgentConfig) GraceDuration() (time.Duration, error) {
 		return 30 * time.Second, nil
 	}
 	return time.ParseDuration(c.GracePeriod)
+}
+
+// MemoryBytes parses the Memory field and returns the value in bytes.
+// Returns 0 if no memory limit is set.
+func (c *AgentConfig) MemoryBytes() (int64, error) {
+	if c.Memory == "" {
+		return 0, nil
+	}
+	return ParseMemory(c.Memory)
+}
+
+// ParseMemory parses a human-readable memory string into bytes.
+// Supported suffixes: KiB, MiB, GiB, KB, MB, GB (case-insensitive).
+// Plain integers are treated as bytes.
+func ParseMemory(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty memory string")
+	}
+
+	// Try parsing as plain integer (bytes).
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if n < 0 {
+			return 0, fmt.Errorf("memory must be non-negative, got %d", n)
+		}
+		return n, nil
+	}
+
+	// Find where the numeric part ends and the suffix begins.
+	i := 0
+	for i < len(s) && (s[i] >= '0' && s[i] <= '9' || s[i] == '.') {
+		i++
+	}
+	if i == 0 {
+		return 0, fmt.Errorf("invalid memory format %q: no numeric value", s)
+	}
+
+	numStr := s[:i]
+	suffix := strings.ToLower(strings.TrimSpace(s[i:]))
+
+	num, err := strconv.ParseFloat(numStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid memory format %q: %w", s, err)
+	}
+	if num < 0 {
+		return 0, fmt.Errorf("memory must be non-negative, got %s", s)
+	}
+
+	var multiplier float64
+	switch suffix {
+	case "kib":
+		multiplier = 1024
+	case "mib":
+		multiplier = 1024 * 1024
+	case "gib":
+		multiplier = 1024 * 1024 * 1024
+	case "kb":
+		multiplier = 1000
+	case "mb":
+		multiplier = 1000 * 1000
+	case "gb":
+		multiplier = 1000 * 1000 * 1000
+	default:
+		return 0, fmt.Errorf("unknown memory suffix %q in %q: use KiB, MiB, GiB, KB, MB, or GB", suffix, s)
+	}
+
+	return int64(num * multiplier), nil
 }

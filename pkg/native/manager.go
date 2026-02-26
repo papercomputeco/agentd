@@ -1,8 +1,8 @@
-// Package manager manages the lifecycle of an agent process running
+// Package native manages the lifecycle of a native agent process running
 // in a tmux session. It handles starting the agent, monitoring its health,
 // implementing restart policies (no, on-failure, always), enforcing
 // timeouts, and coordinating graceful shutdown.
-package manager
+package native
 
 import (
 	"context"
@@ -124,6 +124,7 @@ func (s *Manager) Status() api.AgentStatus {
 		Session:  s.config.Session,
 		Restarts: s.restarts,
 		Error:    s.lastErr,
+		Type:     "native",
 	}
 }
 

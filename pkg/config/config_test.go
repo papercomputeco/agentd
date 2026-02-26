@@ -26,10 +26,13 @@ harness = "claude-code"
 			cfg, err := config.ParseConfig(toml)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cfg.Harness).To(Equal("claude-code"))
+			Expect(cfg.Type).To(Equal(config.AgentTypeSandboxed))
 			Expect(cfg.Workdir).To(Equal("/home/agent/workspace"))
 			Expect(cfg.Restart).To(Equal(config.RestartNo))
 			Expect(cfg.GracePeriod).To(Equal("30s"))
 			Expect(cfg.Session).To(Equal("claude-code"))
+			Expect(cfg.Memory).To(Equal("2GiB"))
+			Expect(cfg.PidLimit).To(Equal(512))
 		})
 
 		It("should parse a fully specified config", func() {
@@ -159,6 +162,141 @@ harness = "claude-code"
 			Expect(err).NotTo(HaveOccurred())
 			Expect(cfg.Harness).To(Equal("claude-code"))
 		})
+
+		It("should parse type=sandboxed explicitly", func() {
+			toml := `
+[agent]
+harness = "claude-code"
+type = "sandboxed"
+`
+			cfg, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Type).To(Equal(config.AgentTypeSandboxed))
+			Expect(cfg.Memory).To(Equal("2GiB"))
+			Expect(cfg.PidLimit).To(Equal(512))
+		})
+
+		It("should parse type=native", func() {
+			toml := `
+[agent]
+harness = "claude-code"
+type = "native"
+`
+			cfg, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Type).To(Equal(config.AgentTypeNative))
+			// Native agents do not get sandbox defaults.
+			Expect(cfg.Memory).To(BeEmpty())
+			Expect(cfg.PidLimit).To(Equal(0))
+		})
+
+		It("should reject invalid type", func() {
+			toml := `
+[agent]
+harness = "claude-code"
+type = "docker"
+`
+			_, err := config.ParseConfig(toml)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("invalid agent.type"))
+		})
+
+		It("should parse sandbox-specific fields", func() {
+			toml := `
+[agent]
+harness = "claude-code"
+type = "sandboxed"
+memory = "4GiB"
+pid_limit = 1024
+`
+			cfg, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Memory).To(Equal("4GiB"))
+			Expect(cfg.PidLimit).To(Equal(1024))
+		})
+
+		It("should reject invalid memory format", func() {
+			toml := `
+[agent]
+harness = "claude-code"
+type = "sandboxed"
+memory = "lots"
+`
+			_, err := config.ParseConfig(toml)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("invalid agent.memory"))
+		})
+
+		It("should reject negative pid_limit", func() {
+			toml := `
+[agent]
+harness = "claude-code"
+type = "sandboxed"
+pid_limit = -1
+`
+			_, err := config.ParseConfig(toml)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("pid_limit"))
+		})
+
+		It("should parse extra_packages for sandboxed agents", func() {
+			toml := `
+[agent]
+harness = "claude-code"
+type = "sandboxed"
+extra_packages = ["ripgrep", "fd", "python311"]
+`
+			cfg, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.ExtraPackages).To(Equal([]string{"ripgrep", "fd", "python311"}))
+		})
+
+		It("should accept empty extra_packages", func() {
+			toml := `
+[agent]
+harness = "claude-code"
+type = "sandboxed"
+extra_packages = []
+`
+			cfg, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.ExtraPackages).To(BeEmpty())
+		})
+
+		It("should accept sandboxed agent without extra_packages", func() {
+			toml := `
+[agent]
+harness = "claude-code"
+type = "sandboxed"
+`
+			cfg, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.ExtraPackages).To(BeNil())
+		})
+
+		It("should reject extra_packages with empty string entries", func() {
+			toml := `
+[agent]
+harness = "claude-code"
+type = "sandboxed"
+extra_packages = ["ripgrep", "", "fd"]
+`
+			_, err := config.ParseConfig(toml)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("extra_packages[1] is empty"))
+		})
+
+		It("should reject extra_packages for native agents", func() {
+			toml := `
+[agent]
+harness = "claude-code"
+type = "native"
+extra_packages = ["ripgrep"]
+`
+			_, err := config.ParseConfig(toml)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("extra_packages is only supported for type=sandboxed"))
+		})
 	})
 
 	Describe("LoadConfig", func() {
@@ -265,6 +403,88 @@ prompt = "hello world"
 			d, err := cfg.GraceDuration()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(d.Minutes()).To(Equal(1.0))
+		})
+	})
+
+	Describe("ParseMemory", func() {
+		It("should parse GiB", func() {
+			n, err := config.ParseMemory("2GiB")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(2 * 1024 * 1024 * 1024)))
+		})
+
+		It("should parse MiB", func() {
+			n, err := config.ParseMemory("512MiB")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(512 * 1024 * 1024)))
+		})
+
+		It("should parse KiB", func() {
+			n, err := config.ParseMemory("1024KiB")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(1024 * 1024)))
+		})
+
+		It("should parse GB (decimal)", func() {
+			n, err := config.ParseMemory("1GB")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(1000 * 1000 * 1000)))
+		})
+
+		It("should parse MB (decimal)", func() {
+			n, err := config.ParseMemory("500MB")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(500 * 1000 * 1000)))
+		})
+
+		It("should parse plain bytes", func() {
+			n, err := config.ParseMemory("1073741824")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(1073741824)))
+		})
+
+		It("should be case-insensitive", func() {
+			n, err := config.ParseMemory("2gib")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(2 * 1024 * 1024 * 1024)))
+		})
+
+		It("should reject empty string", func() {
+			_, err := config.ParseMemory("")
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should reject unknown suffix", func() {
+			_, err := config.ParseMemory("2TiB")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("unknown memory suffix"))
+		})
+
+		It("should reject non-numeric value", func() {
+			_, err := config.ParseMemory("lots")
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should parse fractional values", func() {
+			n, err := config.ParseMemory("1.5GiB")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(1.5 * 1024 * 1024 * 1024)))
+		})
+	})
+
+	Describe("MemoryBytes", func() {
+		It("should return 0 when memory is empty", func() {
+			cfg := &config.AgentConfig{Harness: "claude-code"}
+			n, err := cfg.MemoryBytes()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(BeZero())
+		})
+
+		It("should parse the memory field", func() {
+			cfg := &config.AgentConfig{Harness: "claude-code", Memory: "2GiB"}
+			n, err := cfg.MemoryBytes()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(2 * 1024 * 1024 * 1024)))
 		})
 	})
 })

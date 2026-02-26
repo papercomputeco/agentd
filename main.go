@@ -29,6 +29,9 @@ func main() {
 	apiSocket := flag.String("api-socket", agentd.DefaultAPISocketPath, "path to agentd API unix socket")
 	secretDir := flag.String("secret-dir", agentd.SecretDir, "path to secrets directory")
 	tmuxSocket := flag.String("tmux-socket", agentd.TmuxSocketPath, "path to tmux server socket")
+	runscPath := flag.String("runsc-path", "", "path to runsc binary (auto-detected if empty)")
+	sandboxStateDir := flag.String("sandbox-state-dir", agentd.DefaultSandboxStateDir, "root directory for runsc container state")
+	sandboxBundleDir := flag.String("sandbox-bundle-dir", agentd.DefaultSandboxBundleDir, "base directory for OCI bundles")
 	debug := flag.Bool("debug", false, "enable debug logging (logs commands, env keys, captures pane output on exit)")
 	flag.Parse()
 
@@ -47,6 +50,15 @@ func main() {
 	}
 	if *tmuxSocket != agentd.TmuxSocketPath {
 		daemon.SetTmuxSocketPath(*tmuxSocket)
+	}
+	if *runscPath != "" {
+		daemon.SetRunscPath(*runscPath)
+	}
+	if *sandboxStateDir != agentd.DefaultSandboxStateDir {
+		daemon.SetSandboxStateDir(*sandboxStateDir)
+	}
+	if *sandboxBundleDir != agentd.DefaultSandboxBundleDir {
+		daemon.SetSandboxBundleDir(*sandboxBundleDir)
 	}
 	if *debug {
 		daemon.SetDebug(true)

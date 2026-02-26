@@ -1,4 +1,4 @@
-package manager_test
+package native_test
 
 import (
 	"testing"
@@ -8,12 +8,12 @@ import (
 
 	"github.com/papercomputeco/agentd/pkg/config"
 	"github.com/papercomputeco/agentd/pkg/harness"
-	"github.com/papercomputeco/agentd/pkg/manager"
+	"github.com/papercomputeco/agentd/pkg/native"
 )
 
-func TestManager(t *testing.T) {
+func TestNative(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Manager Suite")
+	RunSpecs(t, "Native Suite")
 }
 
 var _ = Describe("Manager", func() {
@@ -30,7 +30,7 @@ var _ = Describe("Manager", func() {
 				Session:     "claude-code",
 			}
 
-			m := manager.NewManager(manager.Opts{
+			m := native.NewManager(native.Opts{
 				Config:  cfg,
 				Harness: h,
 				Env:     map[string]string{"FOO": "bar"},
@@ -55,7 +55,7 @@ var _ = Describe("Manager", func() {
 				Session:     "opencode",
 			}
 
-			m := manager.NewManager(manager.Opts{
+			m := native.NewManager(native.Opts{
 				Config:  cfg,
 				Harness: h,
 			})
@@ -82,7 +82,7 @@ var _ = Describe("Manager", func() {
 				Session:     "claude-code",
 			}
 
-			m := manager.NewManager(manager.Opts{
+			m := native.NewManager(native.Opts{
 				Config:  cfg,
 				Harness: h,
 			})
