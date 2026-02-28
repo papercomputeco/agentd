@@ -21,6 +21,7 @@ import (
 	"log"
 	"maps"
 	"os"
+	"os/exec"
 	"sort"
 	"sync"
 	"time"
@@ -28,7 +29,8 @@ import (
 	"github.com/papercomputeco/agentd/pkg/api"
 	"github.com/papercomputeco/agentd/pkg/config"
 	"github.com/papercomputeco/agentd/pkg/harness"
-	"github.com/papercomputeco/agentd/pkg/manager"
+	"github.com/papercomputeco/agentd/pkg/native"
+	"github.com/papercomputeco/agentd/pkg/sandbox"
 	"github.com/papercomputeco/agentd/pkg/secrets"
 	"github.com/papercomputeco/agentd/pkg/tmux"
 )
@@ -55,12 +57,28 @@ const (
 	// tmux sessions are launched as this user so the processes execute
 	// with agent-level (not root) privileges.
 	AgentUser = "agent"
+
+	// DefaultSandboxStateDir is the default root directory for runsc state.
+	DefaultSandboxStateDir = "/run/agentd/runsc-state"
+
+	// DefaultSandboxBundleDir is the default base directory for OCI bundles.
+	DefaultSandboxBundleDir = "/run/agentd/sandboxes"
 )
+
+// AgentManager is the common interface for agent lifecycle management.
+// Both the tmux-based native manager and the gVisor sandbox manager
+// implement this interface.
+type AgentManager interface {
+	Start(ctx context.Context) error
+	Stop() error
+	IsRunning() bool
+	Status() api.AgentStatus
+}
 
 // Daemon is the agent daemon. It runs a reconciliation loop that
 // watches for configuration and secret changes, serves an API for
 // external consumers to pull agent state, and manages agent harnesses
-// in tmux sessions via a manager.
+// via either tmux sessions (native) or gVisor sandboxes (sandboxed).
 type Daemon struct {
 	configPath        string
 	secretDir         string
@@ -69,10 +87,16 @@ type Daemon struct {
 	reconcileInterval time.Duration
 	debug             bool
 
+	// Sandbox configuration.
+	runscPath        string // path to the runsc binary
+	sandboxStateDir  string // --root flag for runsc
+	sandboxBundleDir string // base directory for OCI bundles
+
 	// runtime state, guarded by mu
 	mu        sync.Mutex
-	manager   *manager.Manager
+	manager   AgentManager
 	tmux      *tmux.Server
+	runner    *sandbox.Runner
 	apiServer *api.Server
 
 	// lastConfigHash and lastSecretHash track whether config/secrets
@@ -93,7 +117,24 @@ func NewDaemon(configPath string) *Daemon {
 		apiSocketPath:     DefaultAPISocketPath,
 		tmuxSocketPath:    TmuxSocketPath,
 		reconcileInterval: DefaultReconcileInterval,
+		sandboxStateDir:   DefaultSandboxStateDir,
+		sandboxBundleDir:  DefaultSandboxBundleDir,
 	}
+}
+
+// SetRunscPath overrides the auto-detected runsc binary path.
+func (d *Daemon) SetRunscPath(path string) {
+	d.runscPath = path
+}
+
+// SetSandboxStateDir overrides the default sandbox state directory.
+func (d *Daemon) SetSandboxStateDir(dir string) {
+	d.sandboxStateDir = dir
+}
+
+// SetSandboxBundleDir overrides the default sandbox bundle directory.
+func (d *Daemon) SetSandboxBundleDir(dir string) {
+	d.sandboxBundleDir = dir
 }
 
 // SetAPISocketPath overrides the default API socket path. This is useful
@@ -140,14 +181,36 @@ func (d *Daemon) AgentStatuses() []api.AgentStatus {
 // Run starts the agentd daemon and blocks until the context is cancelled.
 // It performs the following lifecycle:
 //
-//  1. Start the tmux server
-//  2. Start the API server
-//  3. Run the reconciliation loop (reads config + secrets, converges)
-//  4. On shutdown: stop manager, stop API, stop tmux
+//  1. Initialize sandbox runner
+//  2. Start the tmux server
+//  3. Start the API server
+//  4. Run the reconciliation loop (reads config + secrets, converges)
+//  5. On shutdown: stop manager, stop API, stop tmux
 func (d *Daemon) Run(ctx context.Context) error {
 	log.Println("agentd: initializing agent manager")
 
-	// 1. Start tmux server.
+	// 1. Verify required binaries. agentd runs on stereOS (NixOS) and
+	// requires both runsc (gVisor) and nix to be available.
+	if _, err := exec.LookPath("nix"); err != nil {
+		return fmt.Errorf("nix not found in PATH: %w", err)
+	}
+
+	// Initialize sandbox runner. gVisor (runsc) is required — agentd
+	// cannot start without it since sandboxed is the default agent type.
+	runner, err := sandbox.NewRunner(d.runscPath, d.sandboxStateDir)
+	if err != nil {
+		return fmt.Errorf("sandbox runtime unavailable: %w", err)
+	}
+	d.runner = runner
+	d.runner.Debug = d.debug
+	log.Printf("agentd: sandbox runtime initialized (runsc=%s, state=%s)", runner.RunscPath, d.sandboxStateDir)
+
+	// Clean up any orphaned containers from a previous crash.
+	if err := d.runner.Cleanup(ctx); err != nil {
+		log.Printf("agentd: warning: sandbox cleanup: %v", err)
+	}
+
+	// 2. Start tmux server.
 	// Run tmux as the agent user so sessions execute with agent-level
 	// privileges and the socket is owned by agent (tmux enforces UID
 	// ownership checks on socket connections).
@@ -161,7 +224,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		_ = d.tmux.Stop()
 	}()
 
-	// 2. Start API server.
+	// 3. Start API server.
 	log.Printf("agentd: starting API server on %s", d.apiSocketPath)
 	d.apiServer = api.NewServer(d.apiSocketPath, d)
 	if err := d.apiServer.Start(); err != nil {
@@ -174,19 +237,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 		_ = d.apiServer.Stop(shutdownCtx)
 	}()
 
-	// 3. Run the reconciliation loop.
+	// 4. Run the reconciliation loop.
 	log.Printf("agentd: starting reconciliation loop (interval=%s)", d.reconcileInterval)
 	d.reconcileLoop(ctx)
 
-	// 4. Graceful shutdown.
+	// 5. Graceful shutdown.
 	log.Println("agentd: shutting down")
 	d.mu.Lock()
-	sup := d.manager
+	mgr := d.manager
 	d.mu.Unlock()
 
-	if sup != nil {
+	if mgr != nil {
 		log.Println("agentd: stopping agent")
-		if err := sup.Stop(); err != nil {
+		if err := mgr.Stop(); err != nil {
 			log.Printf("agentd: error stopping agent: %v", err)
 		}
 	}
@@ -246,23 +309,23 @@ func (d *Daemon) reconcile(ctx context.Context) {
 
 	d.mu.Lock()
 	changed := configHash != d.lastConfigHash || secretHash != d.lastSecretHash
-	hasmanager := d.manager != nil
+	hasManager := d.manager != nil
 	d.mu.Unlock()
 
-	if !changed && hasmanager {
+	if !changed && hasManager {
 		// No changes and agent is already running — nothing to do.
 		return
 	}
 
 	// If the desired state changed and we have a running manager, stop it.
-	if changed && hasmanager {
+	if changed && hasManager {
 		log.Println("agentd: reconcile: config or secrets changed, restarting agent")
 		d.mu.Lock()
-		sup := d.manager
+		mgr := d.manager
 		d.manager = nil
 		d.mu.Unlock()
 
-		if err := sup.Stop(); err != nil {
+		if err := mgr.Stop(); err != nil {
 			log.Printf("agentd: reconcile: error stopping previous agent: %v", err)
 		}
 	}
@@ -286,24 +349,50 @@ func (d *Daemon) reconcile(ctx context.Context) {
 	maps.Copy(mergedEnv, secretEnv)
 	maps.Copy(mergedEnv, cfg.Env)
 
-	// Create and start manager.
-	sup := manager.NewManager(manager.Opts{
-		Config:  cfg,
-		Harness: h,
-		Tmux:    d.tmux,
-		Env:     mergedEnv,
-		Prompt:  prompt,
-		Debug:   d.debug,
-	})
+	// Create the appropriate manager based on agent type.
+	var mgr AgentManager
 
-	log.Printf("agentd: reconcile: launching agent harness=%s session=%s", cfg.Harness, cfg.Session)
-	if err := sup.Start(ctx); err != nil {
+	switch cfg.Type {
+	case config.AgentTypeSandboxed:
+		if d.runner == nil {
+			log.Println("agentd: reconcile: type=sandboxed but sandbox runner not initialized (this should not happen)")
+			return
+		}
+		mgr = sandbox.NewManager(sandbox.ManagerOpts{
+			Config:        cfg,
+			Harness:       h,
+			Runner:        d.runner,
+			Env:           mergedEnv,
+			Prompt:        prompt,
+			Debug:         d.debug,
+			BundleBaseDir: d.sandboxBundleDir,
+			ExtraPackages: cfg.ExtraPackages,
+		})
+		log.Printf("agentd: reconcile: launching sandboxed agent harness=%s", cfg.Harness)
+
+	case config.AgentTypeNative:
+		mgr = native.NewManager(native.Opts{
+			Config:  cfg,
+			Harness: h,
+			Tmux:    d.tmux,
+			Env:     mergedEnv,
+			Prompt:  prompt,
+			Debug:   d.debug,
+		})
+		log.Printf("agentd: reconcile: launching native agent harness=%s session=%s", cfg.Harness, cfg.Session)
+
+	default:
+		log.Printf("agentd: reconcile: unknown agent type %q", cfg.Type)
+		return
+	}
+
+	if err := mgr.Start(ctx); err != nil {
 		log.Printf("agentd: reconcile: error starting agent: %v", err)
 		return
 	}
 
 	d.mu.Lock()
-	d.manager = sup
+	d.manager = mgr
 	d.lastConfigHash = configHash
 	d.lastSecretHash = secretHash
 	d.mu.Unlock()

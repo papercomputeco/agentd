@@ -123,6 +123,24 @@ var _ = Describe("Server", func() {
 			Expect(agents[1].Running).To(BeFalse())
 			Expect(agents[1].Error).To(Equal("exited"))
 		})
+
+		It("should include the type field when set", func() {
+			provider.agents = []api.AgentStatus{
+				{Name: "claude-code", Running: true, Session: "agent-claude-code", Type: "sandboxed"},
+				{Name: "opencode", Running: true, Session: "opencode", Type: "native"},
+			}
+			startServer()
+
+			resp, err := client.Get("http://agentd/v1/agents")
+			Expect(err).NotTo(HaveOccurred())
+			defer resp.Body.Close()
+
+			var agents []api.AgentStatus
+			Expect(json.NewDecoder(resp.Body).Decode(&agents)).To(Succeed())
+			Expect(agents).To(HaveLen(2))
+			Expect(agents[0].Type).To(Equal("sandboxed"))
+			Expect(agents[1].Type).To(Equal("native"))
+		})
 	})
 
 	Describe("GET /v1/agents/{name}", func() {

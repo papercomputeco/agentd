@@ -35,6 +35,7 @@ type AgentStatus struct {
 	Session  string `json:"session,omitempty"`
 	Restarts int    `json:"restarts"`
 	Error    string `json:"error,omitempty"`
+	Type     string `json:"type,omitempty"`
 }
 
 // HealthResponse is returned by GET /v1/health.
