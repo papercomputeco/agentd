@@ -18,26 +18,29 @@ func TestConfig(t *testing.T) {
 
 var _ = Describe("Config", func() {
 	Describe("ParseConfig", func() {
-		It("should parse a minimal valid config", func() {
+		It("should parse a minimal valid config with one agent", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 `
-			cfg, err := config.ParseConfig(toml)
+			agents, err := config.ParseConfig(toml)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.Harness).To(Equal("claude-code"))
-			Expect(cfg.Type).To(Equal(config.AgentTypeSandboxed))
-			Expect(cfg.Workdir).To(Equal("/home/agent/workspace"))
-			Expect(cfg.Restart).To(Equal(config.RestartNo))
-			Expect(cfg.GracePeriod).To(Equal("30s"))
-			Expect(cfg.Session).To(Equal("claude-code"))
-			Expect(cfg.Memory).To(Equal("2GiB"))
-			Expect(cfg.PidLimit).To(Equal(512))
+			Expect(agents).To(HaveLen(1))
+			Expect(agents[0].Harness).To(Equal("claude-code"))
+			Expect(agents[0].Type).To(Equal(config.AgentTypeSandboxed))
+			Expect(agents[0].Workdir).To(Equal("/home/agent/workspace"))
+			Expect(agents[0].Restart).To(Equal(config.RestartNo))
+			Expect(agents[0].GracePeriod).To(Equal("30s"))
+			Expect(agents[0].Name).To(Equal("claude-code"))
+			Expect(agents[0].Session).To(Equal("claude-code"))
+			Expect(agents[0].Memory).To(Equal("2GiB"))
+			Expect(agents[0].PidLimit).To(Equal(512))
 		})
 
 		It("should parse a fully specified config", func() {
 			toml := `
-[agent]
+[[agents]]
+name = "my-agent"
 harness = "opencode"
 prompt = "fix the tests"
 workdir = "/home/agent/project"
@@ -47,12 +50,15 @@ timeout = "2h"
 grace_period = "1m"
 session = "my-session"
 
-[agent.env]
+[agents.env]
 FOO = "bar"
 BAZ = "qux"
 `
-			cfg, err := config.ParseConfig(toml)
+			agents, err := config.ParseConfig(toml)
 			Expect(err).NotTo(HaveOccurred())
+			Expect(agents).To(HaveLen(1))
+			cfg := agents[0]
+			Expect(cfg.Name).To(Equal("my-agent"))
 			Expect(cfg.Harness).To(Equal("opencode"))
 			Expect(cfg.Prompt).To(Equal("fix the tests"))
 			Expect(cfg.Workdir).To(Equal("/home/agent/project"))
@@ -65,9 +71,70 @@ BAZ = "qux"
 			Expect(cfg.Env).To(HaveKeyWithValue("BAZ", "qux"))
 		})
 
+		It("should parse multiple agents", func() {
+			toml := `
+[[agents]]
+name = "reviewer"
+harness = "claude-code"
+prompt = "review the code"
+
+[[agents]]
+name = "coder"
+harness = "opencode"
+prompt = "implement the feature"
+
+[[agents]]
+harness = "gemini-cli"
+prompt = "security audit"
+`
+			agents, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agents).To(HaveLen(3))
+			Expect(agents[0].Name).To(Equal("reviewer"))
+			Expect(agents[1].Name).To(Equal("coder"))
+			Expect(agents[2].Name).To(Equal("gemini-cli"))
+		})
+
+		It("should auto-generate unique names for duplicate harnesses", func() {
+			toml := `
+[[agents]]
+harness = "claude-code"
+prompt = "task one"
+
+[[agents]]
+harness = "claude-code"
+prompt = "task two"
+`
+			agents, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agents).To(HaveLen(2))
+			Expect(agents[0].Name).To(Equal("claude-code-0"))
+			Expect(agents[1].Name).To(Equal("claude-code-1"))
+		})
+
+		It("should default session to agent name", func() {
+			toml := `
+[[agents]]
+name = "my-reviewer"
+harness = "claude-code"
+`
+			agents, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agents[0].Session).To(Equal("my-reviewer"))
+		})
+
+		It("should return empty slice when no agents defined", func() {
+			toml := `
+mixtape = "base"
+`
+			agents, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agents).To(BeEmpty())
+		})
+
 		It("should reject missing harness", func() {
 			toml := `
-[agent]
+[[agents]]
 prompt = "do stuff"
 `
 			_, err := config.ParseConfig(toml)
@@ -77,7 +144,7 @@ prompt = "do stuff"
 
 		It("should reject unknown harness", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "unknown-thing"
 `
 			_, err := config.ParseConfig(toml)
@@ -87,7 +154,7 @@ harness = "unknown-thing"
 
 		It("should reject invalid restart policy", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 restart = "sometimes"
 `
@@ -98,7 +165,7 @@ restart = "sometimes"
 
 		It("should reject invalid timeout duration", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 timeout = "not-a-duration"
 `
@@ -109,7 +176,7 @@ timeout = "not-a-duration"
 
 		It("should reject invalid grace_period duration", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 grace_period = "bad"
 `
@@ -120,7 +187,7 @@ grace_period = "bad"
 
 		It("should reject negative max_restarts", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 max_restarts = -1
 `
@@ -129,21 +196,36 @@ max_restarts = -1
 			Expect(err.Error()).To(ContainSubstring("max_restarts"))
 		})
 
+		It("should reject duplicate agent names", func() {
+			toml := `
+[[agents]]
+name = "same-name"
+harness = "claude-code"
+
+[[agents]]
+name = "same-name"
+harness = "opencode"
+`
+			_, err := config.ParseConfig(toml)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("duplicate agent name"))
+		})
+
 		It("should accept all valid harness types", func() {
 			for _, h := range []string{"claude-code", "opencode", "gemini-cli", "custom"} {
-				toml := "[agent]\nharness = \"" + h + "\""
-				cfg, err := config.ParseConfig(toml)
+				toml := "[[agents]]\nharness = \"" + h + "\""
+				agents, err := config.ParseConfig(toml)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(cfg.Harness).To(Equal(h))
+				Expect(agents[0].Harness).To(Equal(h))
 			}
 		})
 
 		It("should accept all valid restart policies", func() {
 			for _, r := range []string{"no", "on-failure", "always"} {
-				toml := "[agent]\nharness = \"claude-code\"\nrestart = \"" + r + "\""
-				cfg, err := config.ParseConfig(toml)
+				toml := "[[agents]]\nharness = \"claude-code\"\nrestart = \"" + r + "\""
+				agents, err := config.ParseConfig(toml)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(string(cfg.Restart)).To(Equal(r))
+				Expect(string(agents[0].Restart)).To(Equal(r))
 			}
 		})
 
@@ -155,44 +237,44 @@ mixtape = "base"
 cpus = 2
 memory = "4GiB"
 
-[agent]
+[[agents]]
 harness = "claude-code"
 `
-			cfg, err := config.ParseConfig(toml)
+			agents, err := config.ParseConfig(toml)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.Harness).To(Equal("claude-code"))
+			Expect(agents[0].Harness).To(Equal("claude-code"))
 		})
 
 		It("should parse type=sandboxed explicitly", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 type = "sandboxed"
 `
-			cfg, err := config.ParseConfig(toml)
+			agents, err := config.ParseConfig(toml)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.Type).To(Equal(config.AgentTypeSandboxed))
-			Expect(cfg.Memory).To(Equal("2GiB"))
-			Expect(cfg.PidLimit).To(Equal(512))
+			Expect(agents[0].Type).To(Equal(config.AgentTypeSandboxed))
+			Expect(agents[0].Memory).To(Equal("2GiB"))
+			Expect(agents[0].PidLimit).To(Equal(512))
 		})
 
 		It("should parse type=native", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 type = "native"
 `
-			cfg, err := config.ParseConfig(toml)
+			agents, err := config.ParseConfig(toml)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.Type).To(Equal(config.AgentTypeNative))
+			Expect(agents[0].Type).To(Equal(config.AgentTypeNative))
 			// Native agents do not get sandbox defaults.
-			Expect(cfg.Memory).To(BeEmpty())
-			Expect(cfg.PidLimit).To(Equal(0))
+			Expect(agents[0].Memory).To(BeEmpty())
+			Expect(agents[0].PidLimit).To(Equal(0))
 		})
 
 		It("should reject invalid type", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 type = "docker"
 `
@@ -203,21 +285,21 @@ type = "docker"
 
 		It("should parse sandbox-specific fields", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 type = "sandboxed"
 memory = "4GiB"
 pid_limit = 1024
 `
-			cfg, err := config.ParseConfig(toml)
+			agents, err := config.ParseConfig(toml)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.Memory).To(Equal("4GiB"))
-			Expect(cfg.PidLimit).To(Equal(1024))
+			Expect(agents[0].Memory).To(Equal("4GiB"))
+			Expect(agents[0].PidLimit).To(Equal(1024))
 		})
 
 		It("should reject invalid memory format", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 type = "sandboxed"
 memory = "lots"
@@ -229,7 +311,7 @@ memory = "lots"
 
 		It("should reject negative pid_limit", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 type = "sandboxed"
 pid_limit = -1
@@ -241,42 +323,42 @@ pid_limit = -1
 
 		It("should parse extra_packages for sandboxed agents", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 type = "sandboxed"
 extra_packages = ["ripgrep", "fd", "python311"]
 `
-			cfg, err := config.ParseConfig(toml)
+			agents, err := config.ParseConfig(toml)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.ExtraPackages).To(Equal([]string{"ripgrep", "fd", "python311"}))
+			Expect(agents[0].ExtraPackages).To(Equal([]string{"ripgrep", "fd", "python311"}))
 		})
 
 		It("should accept empty extra_packages", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 type = "sandboxed"
 extra_packages = []
 `
-			cfg, err := config.ParseConfig(toml)
+			agents, err := config.ParseConfig(toml)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.ExtraPackages).To(BeEmpty())
+			Expect(agents[0].ExtraPackages).To(BeEmpty())
 		})
 
 		It("should accept sandboxed agent without extra_packages", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 type = "sandboxed"
 `
-			cfg, err := config.ParseConfig(toml)
+			agents, err := config.ParseConfig(toml)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.ExtraPackages).To(BeNil())
+			Expect(agents[0].ExtraPackages).To(BeNil())
 		})
 
 		It("should reject extra_packages with empty string entries", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 type = "sandboxed"
 extra_packages = ["ripgrep", "", "fd"]
@@ -288,7 +370,7 @@ extra_packages = ["ripgrep", "", "fd"]
 
 		It("should reject extra_packages for native agents", func() {
 			toml := `
-[agent]
+[[agents]]
 harness = "claude-code"
 type = "native"
 extra_packages = ["ripgrep"]
@@ -297,6 +379,27 @@ extra_packages = ["ripgrep"]
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("extra_packages is only supported for type=sandboxed"))
 		})
+
+		It("should parse mixed native and sandboxed agents", func() {
+			toml := `
+[[agents]]
+name = "native-claude"
+harness = "claude-code"
+type = "native"
+
+[[agents]]
+name = "sandbox-opencode"
+harness = "opencode"
+type = "sandboxed"
+memory = "4GiB"
+`
+			agents, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agents).To(HaveLen(2))
+			Expect(agents[0].Type).To(Equal(config.AgentTypeNative))
+			Expect(agents[1].Type).To(Equal(config.AgentTypeSandboxed))
+			Expect(agents[1].Memory).To(Equal("4GiB"))
+		})
 	})
 
 	Describe("LoadConfig", func() {
@@ -304,16 +407,17 @@ extra_packages = ["ripgrep"]
 			dir := GinkgoT().TempDir()
 			path := filepath.Join(dir, "jcard.toml")
 			err := os.WriteFile(path, []byte(`
-[agent]
+[[agents]]
 harness = "gemini-cli"
 prompt = "hello world"
 `), 0644)
 			Expect(err).NotTo(HaveOccurred())
 
-			cfg, err := config.LoadConfig(path)
+			agents, err := config.LoadConfig(path)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(cfg.Harness).To(Equal("gemini-cli"))
-			Expect(cfg.Prompt).To(Equal("hello world"))
+			Expect(agents).To(HaveLen(1))
+			Expect(agents[0].Harness).To(Equal("gemini-cli"))
+			Expect(agents[0].Prompt).To(Equal("hello world"))
 		})
 
 		It("should return error for non-existent file", func() {
@@ -469,6 +573,138 @@ prompt = "hello world"
 			n, err := config.ParseMemory("1.5GiB")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(n).To(Equal(int64(1.5 * 1024 * 1024 * 1024)))
+		})
+	})
+
+	Describe("Replicas", func() {
+		It("should default replicas to 1", func() {
+			toml := `
+[[agents]]
+harness = "claude-code"
+`
+			agents, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agents).To(HaveLen(1))
+			Expect(agents[0].Replicas).To(Equal(1))
+			Expect(agents[0].Name).To(Equal("claude-code"))
+		})
+
+		It("should expand replicas=1 without suffix", func() {
+			toml := `
+[[agents]]
+name = "reviewer"
+harness = "claude-code"
+replicas = 1
+`
+			agents, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agents).To(HaveLen(1))
+			Expect(agents[0].Name).To(Equal("reviewer"))
+		})
+
+		It("should expand named replicas with index suffix", func() {
+			toml := `
+[[agents]]
+name = "reviewer"
+harness = "claude-code"
+prompt = "review code"
+replicas = 3
+`
+			agents, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agents).To(HaveLen(3))
+			Expect(agents[0].Name).To(Equal("reviewer-0"))
+			Expect(agents[1].Name).To(Equal("reviewer-1"))
+			Expect(agents[2].Name).To(Equal("reviewer-2"))
+			// Each replica should have the same harness and prompt.
+			for _, a := range agents {
+				Expect(a.Harness).To(Equal("claude-code"))
+				Expect(a.Prompt).To(Equal("review code"))
+				Expect(a.Replicas).To(Equal(1))
+			}
+		})
+
+		It("should expand unnamed replicas and auto-generate names", func() {
+			toml := `
+[[agents]]
+harness = "claude-code"
+replicas = 3
+`
+			agents, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agents).To(HaveLen(3))
+			Expect(agents[0].Name).To(Equal("claude-code-0"))
+			Expect(agents[1].Name).To(Equal("claude-code-1"))
+			Expect(agents[2].Name).To(Equal("claude-code-2"))
+		})
+
+		It("should handle mixed replicas and single agents", func() {
+			toml := `
+[[agents]]
+name = "lead"
+harness = "claude-code"
+
+[[agents]]
+name = "worker"
+harness = "opencode"
+replicas = 3
+`
+			agents, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agents).To(HaveLen(4))
+			Expect(agents[0].Name).To(Equal("lead"))
+			Expect(agents[1].Name).To(Equal("worker-0"))
+			Expect(agents[2].Name).To(Equal("worker-1"))
+			Expect(agents[3].Name).To(Equal("worker-2"))
+		})
+
+		It("should deep-copy env maps across replicas", func() {
+			toml := `
+[[agents]]
+name = "worker"
+harness = "claude-code"
+replicas = 2
+
+[agents.env]
+KEY = "value"
+`
+			agents, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agents).To(HaveLen(2))
+			// Verify both have the env var.
+			Expect(agents[0].Env).To(HaveKeyWithValue("KEY", "value"))
+			Expect(agents[1].Env).To(HaveKeyWithValue("KEY", "value"))
+			// Verify they are independent maps (deep copy).
+			agents[0].Env["EXTRA"] = "modified"
+			Expect(agents[1].Env).NotTo(HaveKey("EXTRA"))
+		})
+
+		It("should support large replica counts", func() {
+			toml := `
+[[agents]]
+name = "swarm"
+harness = "claude-code"
+replicas = 500
+`
+			agents, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agents).To(HaveLen(500))
+			Expect(agents[0].Name).To(Equal("swarm-0"))
+			Expect(agents[499].Name).To(Equal("swarm-499"))
+		})
+
+		It("should set unique sessions for replicas", func() {
+			toml := `
+[[agents]]
+name = "worker"
+harness = "claude-code"
+replicas = 3
+`
+			agents, err := config.ParseConfig(toml)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agents[0].Session).To(Equal("worker-0"))
+			Expect(agents[1].Session).To(Equal("worker-1"))
+			Expect(agents[2].Session).To(Equal("worker-2"))
 		})
 	})
 

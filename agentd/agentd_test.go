@@ -28,7 +28,7 @@ var _ = Describe("Daemon", func() {
 	})
 
 	Describe("AgentStatuses", func() {
-		It("should return nil when no manager is running", func() {
+		It("should return nil when no agents are running", func() {
 			d := agentd.NewDaemon("")
 			statuses := d.AgentStatuses()
 			Expect(statuses).To(BeNil())
@@ -49,6 +49,19 @@ var _ = Describe("Daemon", func() {
 		})
 	})
 
+	Describe("SetLaunchConcurrency", func() {
+		It("should not panic when setting concurrency", func() {
+			d := agentd.NewDaemon("")
+			Expect(func() { d.SetLaunchConcurrency(100) }).NotTo(Panic())
+		})
+
+		It("should ignore non-positive values", func() {
+			d := agentd.NewDaemon("")
+			Expect(func() { d.SetLaunchConcurrency(0) }).NotTo(Panic())
+			Expect(func() { d.SetLaunchConcurrency(-1) }).NotTo(Panic())
+		})
+	})
+
 	Describe("Constants", func() {
 		It("should reference the correct secret directory", func() {
 			Expect(agentd.SecretDir).To(Equal("/run/stereos/secrets"))
@@ -64,6 +77,10 @@ var _ = Describe("Daemon", func() {
 
 		It("should reference the correct default config path", func() {
 			Expect(agentd.DefaultConfigPath).To(Equal("/etc/stereos/jcard.toml"))
+		})
+
+		It("should have a default launch concurrency", func() {
+			Expect(agentd.DefaultLaunchConcurrency).To(Equal(50))
 		})
 	})
 })

@@ -2,8 +2,9 @@
 // supervising, and stopping configured agent harnesses (Claude Code,
 // OpenCode, Gemini CLI, etc.).
 //
-// agentd manages tmux sessions for each agent, allowing the admin user
-// to "tmux attach [session]" to introspect running agents.
+// agentd manages tmux sessions and gVisor sandboxes for multiple agents
+// concurrently, allowing the admin user to "tmux attach [session]" to
+// introspect running agents.
 //
 // The daemon uses a reconciliation-loop architecture inspired by
 // Kubernetes: it periodically reads the desired state from the
@@ -12,6 +13,9 @@
 // reconfiguring agents as needed). This design decouples agentd from
 // any control-plane daemon — external consumers pull agent state from
 // agentd's own HTTP API served over a Unix domain socket.
+//
+// To handle thousands of agents efficiently, agent launches are
+// throttled through a worker pool with a configurable concurrency limit.
 package agentd
 
 import (
@@ -63,6 +67,11 @@ const (
 
 	// DefaultSandboxBundleDir is the default base directory for OCI bundles.
 	DefaultSandboxBundleDir = "/run/agentd/sandboxes"
+
+	// DefaultLaunchConcurrency is the maximum number of agents that can
+	// be launched concurrently. This prevents resource exhaustion when
+	// bringing hundreds of agents online simultaneously.
+	DefaultLaunchConcurrency = 50
 )
 
 // AgentManager is the common interface for agent lifecycle management.
@@ -75,6 +84,13 @@ type AgentManager interface {
 	Status() api.AgentStatus
 }
 
+// managedAgent tracks a running agent along with the config hash that
+// was used to start it, enabling per-agent change detection.
+type managedAgent struct {
+	manager    AgentManager
+	configHash [sha256.Size]byte
+}
+
 // Daemon is the agent daemon. It runs a reconciliation loop that
 // watches for configuration and secret changes, serves an API for
 // external consumers to pull agent state, and manages agent harnesses
@@ -85,6 +101,7 @@ type Daemon struct {
 	apiSocketPath     string
 	tmuxSocketPath    string
 	reconcileInterval time.Duration
+	launchConcurrency int
 	debug             bool
 
 	// Sandbox configuration.
@@ -94,14 +111,12 @@ type Daemon struct {
 
 	// runtime state, guarded by mu
 	mu        sync.Mutex
-	manager   AgentManager
+	agents    map[string]*managedAgent // keyed by agent name
 	tmux      *tmux.Server
 	runner    *sandbox.Runner
 	apiServer *api.Server
 
-	// lastConfigHash and lastSecretHash track whether config/secrets
-	// have changed since the last reconciliation.
-	lastConfigHash [sha256.Size]byte
+	// lastSecretHash tracks whether secrets have changed globally.
 	lastSecretHash [sha256.Size]byte
 }
 
@@ -117,8 +132,10 @@ func NewDaemon(configPath string) *Daemon {
 		apiSocketPath:     DefaultAPISocketPath,
 		tmuxSocketPath:    TmuxSocketPath,
 		reconcileInterval: DefaultReconcileInterval,
+		launchConcurrency: DefaultLaunchConcurrency,
 		sandboxStateDir:   DefaultSandboxStateDir,
 		sandboxBundleDir:  DefaultSandboxBundleDir,
+		agents:            make(map[string]*managedAgent),
 	}
 }
 
@@ -158,6 +175,14 @@ func (d *Daemon) SetReconcileInterval(interval time.Duration) {
 	d.reconcileInterval = interval
 }
 
+// SetLaunchConcurrency overrides the default maximum number of
+// concurrent agent launches.
+func (d *Daemon) SetLaunchConcurrency(n int) {
+	if n > 0 {
+		d.launchConcurrency = n
+	}
+}
+
 // SetDebug enables or disables debug logging. When enabled, the
 // manager logs the full command, environment variable names, and
 // captures tmux pane output when agents exit.
@@ -166,16 +191,27 @@ func (d *Daemon) SetDebug(debug bool) {
 }
 
 // AgentStatuses implements api.AgentProvider. It returns the status of
-// all managed agents (currently at most one).
+// all managed agents.
 func (d *Daemon) AgentStatuses() []api.AgentStatus {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.manager == nil {
+	if len(d.agents) == 0 {
 		return nil
 	}
 
-	return []api.AgentStatus{d.manager.Status()}
+	// Return in deterministic order by agent name.
+	names := make([]string, 0, len(d.agents))
+	for name := range d.agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	statuses := make([]api.AgentStatus, 0, len(d.agents))
+	for _, name := range names {
+		statuses = append(statuses, d.agents[name].manager.Status())
+	}
+	return statuses
 }
 
 // Run starts the agentd daemon and blocks until the context is cancelled.
@@ -185,7 +221,7 @@ func (d *Daemon) AgentStatuses() []api.AgentStatus {
 //  2. Start the tmux server
 //  3. Start the API server
 //  4. Run the reconciliation loop (reads config + secrets, converges)
-//  5. On shutdown: stop manager, stop API, stop tmux
+//  5. On shutdown: stop all managers, stop API, stop tmux
 func (d *Daemon) Run(ctx context.Context) error {
 	log.Println("agentd: initializing agent manager")
 
@@ -238,20 +274,30 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}()
 
 	// 4. Run the reconciliation loop.
-	log.Printf("agentd: starting reconciliation loop (interval=%s)", d.reconcileInterval)
+	log.Printf("agentd: starting reconciliation loop (interval=%s, max-concurrent-launches=%d)", d.reconcileInterval, d.launchConcurrency)
 	d.reconcileLoop(ctx)
 
-	// 5. Graceful shutdown.
+	// 5. Graceful shutdown — stop all agents.
 	log.Println("agentd: shutting down")
 	d.mu.Lock()
-	mgr := d.manager
+	agentsCopy := make(map[string]*managedAgent, len(d.agents))
+	maps.Copy(agentsCopy, d.agents)
+	d.agents = make(map[string]*managedAgent)
 	d.mu.Unlock()
 
-	if mgr != nil {
-		log.Println("agentd: stopping agent")
-		if err := mgr.Stop(); err != nil {
-			log.Printf("agentd: error stopping agent: %v", err)
+	if len(agentsCopy) > 0 {
+		log.Printf("agentd: stopping %d agents", len(agentsCopy))
+		var wg sync.WaitGroup
+		for name, a := range agentsCopy {
+			wg.Add(1)
+			go func(name string, a *managedAgent) {
+				defer wg.Done()
+				if err := a.manager.Stop(); err != nil {
+					log.Printf("agentd: error stopping agent %s: %v", name, err)
+				}
+			}(name, a)
 		}
+		wg.Wait()
 	}
 
 	log.Println("agentd: shutdown complete")
@@ -278,8 +324,9 @@ func (d *Daemon) reconcileLoop(ctx context.Context) {
 }
 
 // reconcile reads the current desired state (config file + secrets) and
-// converges. If the config or secrets have changed since the last
-// reconciliation, the agent is restarted with the new values.
+// converges. It diffs the desired agent list against running agents and
+// starts/stops/restarts agents as needed. Agent launches are throttled
+// through a worker pool to prevent resource exhaustion.
 func (d *Daemon) reconcile(ctx context.Context) {
 	// Read config file as raw bytes so we can hash before parsing.
 	cfgBytes, err := os.ReadFile(d.configPath)
@@ -289,7 +336,7 @@ func (d *Daemon) reconcile(ctx context.Context) {
 		return
 	}
 
-	cfg, err := config.ParseConfig(string(cfgBytes))
+	agents, err := config.ParseConfig(string(cfgBytes))
 	if err != nil {
 		log.Printf("agentd: reconcile: invalid config: %v", err)
 		return
@@ -303,45 +350,156 @@ func (d *Daemon) reconcile(ctx context.Context) {
 		secretEnv = make(map[string]string)
 	}
 
-	// Compute hashes to detect changes.
-	configHash := sha256.Sum256(cfgBytes)
+	// Detect global secret changes.
 	secretHash := hashSecrets(secretEnv)
-
 	d.mu.Lock()
-	changed := configHash != d.lastConfigHash || secretHash != d.lastSecretHash
-	hasManager := d.manager != nil
+	secretsChanged := secretHash != d.lastSecretHash
+	d.lastSecretHash = secretHash
 	d.mu.Unlock()
 
-	if !changed && hasManager {
-		// No changes and agent is already running — nothing to do.
-		return
-	}
+	// Build desired state: map of agent name -> config + hash.
+	desired := make(map[string]desiredAgent, len(agents))
+	for i := range agents {
+		// Hash includes the individual agent config bytes plus the secret hash,
+		// so a change to either triggers a restart for that agent.
+		h := sha256.New()
+		h.Write([]byte(fmt.Sprintf("%+v", agents[i])))
+		h.Write(secretHash[:])
+		var hash [sha256.Size]byte
+		copy(hash[:], h.Sum(nil))
 
-	// If the desired state changed and we have a running manager, stop it.
-	if changed && hasManager {
-		log.Println("agentd: reconcile: config or secrets changed, restarting agent")
-		d.mu.Lock()
-		mgr := d.manager
-		d.manager = nil
-		d.mu.Unlock()
-
-		if err := mgr.Stop(); err != nil {
-			log.Printf("agentd: reconcile: error stopping previous agent: %v", err)
+		desired[agents[i].Name] = desiredAgent{
+			config: &agents[i],
+			hash:   hash,
 		}
 	}
 
+	// Diff: determine which agents to stop, start, or leave alone.
+	d.mu.Lock()
+	var toStop []string
+	var toStart []desiredAgent
+
+	// Find agents to remove (running but not in desired state).
+	for name := range d.agents {
+		if _, ok := desired[name]; !ok {
+			toStop = append(toStop, name)
+		}
+	}
+
+	// Find agents to start or restart.
+	for name, da := range desired {
+		existing, ok := d.agents[name]
+		if !ok {
+			// New agent.
+			toStart = append(toStart, da)
+		} else if existing.configHash != da.hash || secretsChanged {
+			// Config or secrets changed — restart.
+			toStop = append(toStop, name)
+			toStart = append(toStart, da)
+		}
+		// Otherwise: unchanged, leave running.
+	}
+	d.mu.Unlock()
+
+	// Nothing to do.
+	if len(toStop) == 0 && len(toStart) == 0 {
+		return
+	}
+
+	// Stop removed/changed agents.
+	if len(toStop) > 0 {
+		log.Printf("agentd: reconcile: stopping %d agents", len(toStop))
+		var wg sync.WaitGroup
+		for _, name := range toStop {
+			d.mu.Lock()
+			a, ok := d.agents[name]
+			if ok {
+				delete(d.agents, name)
+			}
+			d.mu.Unlock()
+
+			if ok {
+				wg.Add(1)
+				go func(name string, a *managedAgent) {
+					defer wg.Done()
+					log.Printf("agentd: reconcile: stopping agent %s", name)
+					if err := a.manager.Stop(); err != nil {
+						log.Printf("agentd: reconcile: error stopping agent %s: %v", name, err)
+					}
+				}(name, a)
+			}
+		}
+		wg.Wait()
+	}
+
+	// Launch new/changed agents through the worker pool.
+	if len(toStart) > 0 {
+		log.Printf("agentd: reconcile: launching %d agents (concurrency=%d)", len(toStart), d.launchConcurrency)
+		sem := make(chan struct{}, d.launchConcurrency)
+		var wg sync.WaitGroup
+
+		for _, da := range toStart {
+			wg.Add(1)
+			go func(da desiredAgent) {
+				defer wg.Done()
+
+				// Acquire semaphore slot.
+				select {
+				case sem <- struct{}{}:
+					defer func() { <-sem }()
+				case <-ctx.Done():
+					return
+				}
+
+				mgr, err := d.createManager(da.config, secretEnv)
+				if err != nil {
+					log.Printf("agentd: reconcile: error creating manager for %s: %v", da.config.Name, err)
+					return
+				}
+
+				if err := mgr.Start(ctx); err != nil {
+					log.Printf("agentd: reconcile: error starting agent %s: %v", da.config.Name, err)
+					return
+				}
+
+				d.mu.Lock()
+				d.agents[da.config.Name] = &managedAgent{
+					manager:    mgr,
+					configHash: da.hash,
+				}
+				d.mu.Unlock()
+
+				log.Printf("agentd: reconcile: agent %s running", da.config.Name)
+			}(da)
+		}
+
+		wg.Wait()
+	}
+
+	d.mu.Lock()
+	total := len(d.agents)
+	d.mu.Unlock()
+	log.Printf("agentd: reconcile: %d agents running", total)
+}
+
+// desiredAgent pairs a config with its hash for diff comparison.
+type desiredAgent struct {
+	config *config.AgentConfig
+	hash   [sha256.Size]byte
+}
+
+// createManager creates the appropriate AgentManager for the given config.
+func (d *Daemon) createManager(cfg *config.AgentConfig, secretEnv map[string]string) (AgentManager, error) {
 	// Resolve harness.
 	h, err := harness.Get(cfg.Harness)
 	if err != nil {
-		log.Printf("agentd: reconcile: %v", err)
-		return
+		return nil, err
 	}
 
 	// Resolve prompt.
 	prompt, err := cfg.ResolvePrompt()
 	if err != nil {
-		log.Printf("agentd: reconcile: error resolving prompt: %v", err)
-		return
+		return nil, fmt.Errorf("resolving prompt: %w", err)
 	}
 
 	// Merge environment: secrets first, then agent env (agent env overrides).
@@ -349,16 +507,12 @@ func (d *Daemon) reconcile(ctx context.Context) {
 	maps.Copy(mergedEnv, secretEnv)
 	maps.Copy(mergedEnv, cfg.Env)
 
-	// Create the appropriate manager based on agent type.
-	var mgr AgentManager
-
 	switch cfg.Type {
 	case config.AgentTypeSandboxed:
 		if d.runner == nil {
-			log.Println("agentd: reconcile: type=sandboxed but sandbox runner not initialized (this should not happen)")
-			return
+			return nil, fmt.Errorf("type=sandboxed but sandbox runner not initialized")
 		}
-		mgr = sandbox.NewManager(sandbox.ManagerOpts{
+		mgr := sandbox.NewManager(sandbox.ManagerOpts{
 			Config:        cfg,
 			Harness:       h,
 			Runner:        d.runner,
@@ -368,10 +522,11 @@ func (d *Daemon) reconcile(ctx context.Context) {
 			BundleBaseDir: d.sandboxBundleDir,
 			ExtraPackages: cfg.ExtraPackages,
 		})
-		log.Printf("agentd: reconcile: launching sandboxed agent harness=%s", cfg.Harness)
+		log.Printf("agentd: creating sandboxed agent %s harness=%s", cfg.Name, cfg.Harness)
+		return mgr, nil
 
 	case config.AgentTypeNative:
-		mgr = native.NewManager(native.Opts{
+		mgr := native.NewManager(native.Opts{
 			Config:  cfg,
 			Harness: h,
 			Tmux:    d.tmux,
@@ -379,25 +534,12 @@ func (d *Daemon) reconcile(ctx context.Context) {
 			Prompt:  prompt,
 			Debug:   d.debug,
 		})
-		log.Printf("agentd: reconcile: launching native agent harness=%s session=%s", cfg.Harness, cfg.Session)
+		log.Printf("agentd: creating native agent %s harness=%s session=%s", cfg.Name, cfg.Harness, cfg.Session)
+		return mgr, nil
 
 	default:
-		log.Printf("agentd: reconcile: unknown agent type %q", cfg.Type)
-		return
+		return nil, fmt.Errorf("unknown agent type %q", cfg.Type)
 	}
-
-	if err := mgr.Start(ctx); err != nil {
-		log.Printf("agentd: reconcile: error starting agent: %v", err)
-		return
-	}
-
-	d.mu.Lock()
-	d.manager = mgr
-	d.lastConfigHash = configHash
-	d.lastSecretHash = secretHash
-	d.mu.Unlock()
-
-	log.Println("agentd: reconcile: agent running")
 }
 
 // hashSecrets produces a deterministic hash of a secrets map by sorting
