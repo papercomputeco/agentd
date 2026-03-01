@@ -358,6 +358,7 @@ var _ = Describe("Manager", func() {
 	It("should create a manager with valid options", func() {
 		runner, _ := sandbox.NewRunner("/usr/bin/runsc", "/tmp/state")
 		cfg := &config.AgentConfig{
+			Name:     "claude-code",
 			Type:     config.AgentTypeSandboxed,
 			Harness:  "claude-code",
 			Workdir:  "/home/agent/workspace",
@@ -383,6 +384,7 @@ var _ = Describe("Manager", func() {
 	It("should report correct initial status", func() {
 		runner, _ := sandbox.NewRunner("/usr/bin/runsc", "/tmp/state")
 		cfg := &config.AgentConfig{
+			Name:     "claude-code",
 			Type:     config.AgentTypeSandboxed,
 			Harness:  "claude-code",
 			Workdir:  "/home/agent/workspace",
@@ -408,6 +410,7 @@ var _ = Describe("Manager", func() {
 	It("should report zero restarts initially", func() {
 		runner, _ := sandbox.NewRunner("/usr/bin/runsc", "/tmp/state")
 		cfg := &config.AgentConfig{
+			Name:    "opencode",
 			Type:    config.AgentTypeSandboxed,
 			Harness: "opencode",
 			Restart: config.RestartNo,

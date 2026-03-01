@@ -119,7 +119,7 @@ func (s *Manager) Status() api.AgentStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return api.AgentStatus{
-		Name:     s.harness.Name(),
+		Name:     s.config.Name,
 		Running:  s.running,
 		Session:  s.config.Session,
 		Restarts: s.restarts,
@@ -168,7 +168,7 @@ func (s *Manager) launchAgent() error {
 	s.lastErr = ""
 	s.mu.Unlock()
 
-	log.Printf("manager: agent %q launched in tmux session %q", s.harness.Name(), s.config.Session)
+	log.Printf("manager: agent %q launched in tmux session %q", s.config.Name, s.config.Session)
 	return nil
 }
 
@@ -255,17 +255,17 @@ func (s *Manager) run(ctx context.Context) {
 			s.running = false
 			s.mu.Unlock()
 
-			log.Printf("manager: agent %q exited", s.harness.Name())
+			log.Printf("manager: agent %q exited", s.config.Name)
 
 			// Evaluate restart policy.
 			if !s.shouldRestart() {
 				log.Printf("manager: not restarting agent %q (policy=%s, restarts=%d)",
-					s.harness.Name(), s.config.Restart, s.restarts)
+					s.config.Name, s.config.Restart, s.restarts)
 				return
 			}
 
 			s.restarts++
-			log.Printf("manager: restarting agent %q (attempt %d)", s.harness.Name(), s.restarts)
+			log.Printf("manager: restarting agent %q (attempt %d)", s.config.Name, s.restarts)
 
 			// Backoff before restart.
 			select {
@@ -275,7 +275,7 @@ func (s *Manager) run(ctx context.Context) {
 			}
 
 			if err := s.launchAgent(); err != nil {
-				log.Printf("manager: failed to restart agent %q: %v", s.harness.Name(), err)
+				log.Printf("manager: failed to restart agent %q: %v", s.config.Name, err)
 				s.mu.Lock()
 				s.lastErr = err.Error()
 				s.mu.Unlock()

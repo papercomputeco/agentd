@@ -1,4 +1,4 @@
-// Package config handles parsing and validation of the [agent] section
+// Package config handles parsing and validation of the [[agents]] section
 // from jcard.toml configuration files used by agentd.
 package config
 
@@ -67,8 +67,12 @@ var harnessSet = map[string]bool{
 	"custom":      true,
 }
 
-// AgentConfig represents the [agent] section of a jcard.toml file.
+// AgentConfig represents a single entry in the [[agents]] array of a jcard.toml file.
 type AgentConfig struct {
+	// Name is a unique identifier for this agent. If omitted, a name is
+	// auto-generated from the harness name (e.g. "claude-code", "claude-code-1").
+	Name string `toml:"name,omitempty"`
+
 	// Type selects the agent execution mode.
 	// "sandboxed" (default) runs in a gVisor container with /nix/store sharing.
 	// "native" runs directly on the host in a tmux session.
@@ -124,19 +128,25 @@ type AgentConfig struct {
 	// into /nix/store at agent launch time. Only used for sandboxed agents.
 	ExtraPackages []string `toml:"extra_packages,omitempty"`
 
+	// Replicas is the number of identical agents to launch from this
+	// spec. Defaults to 1. When > 1, each replica gets a unique name
+	// suffixed with its index (e.g. "reviewer-0", "reviewer-1").
+	// Useful for launching swarms of agents performing the same task.
+	Replicas int `toml:"replicas,omitempty"`
+
 	// Env holds environment variables set only for the agent process.
 	Env map[string]string `toml:"env,omitempty"`
 }
 
 // jcardFile is the top-level structure of a jcard.toml, used for partial
-// parsing. We only care about the [agent] section.
+// parsing. We only care about the [[agents]] section.
 type jcardFile struct {
-	Agent AgentConfig `toml:"agent"`
+	Agents []AgentConfig `toml:"agents"`
 }
 
-// LoadConfig reads and parses the [agent] section from a jcard.toml file
+// LoadConfig reads and parses the [[agents]] section from a jcard.toml file
 // at the given path. It applies defaults and validates the configuration.
-func LoadConfig(path string) (*AgentConfig, error) {
+func LoadConfig(path string) ([]AgentConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config %s: %w", path, err)
@@ -145,25 +155,39 @@ func LoadConfig(path string) (*AgentConfig, error) {
 	return ParseConfig(string(data))
 }
 
-// ParseConfig parses the [agent] section from TOML content, applies
-// defaults, and validates the configuration.
-func ParseConfig(content string) (*AgentConfig, error) {
+// ParseConfig parses the [[agents]] section from TOML content, applies
+// defaults, and validates each agent configuration.
+func ParseConfig(content string) ([]AgentConfig, error) {
 	var jcard jcardFile
 	if _, err := toml.Decode(content, &jcard); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
-	cfg := &jcard.Agent
-	cfg.applyDefaults()
+	// Apply defaults, expand replicas, then assign names.
+	for i := range jcard.Agents {
+		jcard.Agents[i].applyDefaults()
+	}
+	jcard.Agents = expandReplicas(jcard.Agents)
+	assignAgentNames(jcard.Agents)
 
-	if err := cfg.Validate(); err != nil {
-		return nil, err
+	// Validate each agent.
+	namesSeen := make(map[string]bool, len(jcard.Agents))
+	for i := range jcard.Agents {
+		if err := jcard.Agents[i].Validate(); err != nil {
+			return nil, fmt.Errorf("agents[%d]: %w", i, err)
+		}
+		if namesSeen[jcard.Agents[i].Name] {
+			return nil, fmt.Errorf("agents[%d]: duplicate agent name %q", i, jcard.Agents[i].Name)
+		}
+		namesSeen[jcard.Agents[i].Name] = true
 	}
 
-	return cfg, nil
+	return jcard.Agents, nil
 }
 
 // applyDefaults fills in default values for unset fields.
+// Note: Name and Session are finalized after assignAgentNames runs,
+// since Name may be auto-generated from the harness.
 func (c *AgentConfig) applyDefaults() {
 	if c.Type == "" {
 		c.Type = DefaultAgentType
@@ -177,9 +201,6 @@ func (c *AgentConfig) applyDefaults() {
 	if c.GracePeriod == "" {
 		c.GracePeriod = DefaultGracePeriod
 	}
-	if c.Session == "" {
-		c.Session = c.Harness
-	}
 	if c.Type == AgentTypeSandboxed {
 		if c.Memory == "" {
 			c.Memory = DefaultMemory
@@ -188,8 +209,98 @@ func (c *AgentConfig) applyDefaults() {
 			c.PidLimit = DefaultPidLimit
 		}
 	}
+	if c.Replicas <= 0 {
+		c.Replicas = 1
+	}
 	if c.Env == nil {
 		c.Env = make(map[string]string)
+	}
+}
+
+// expandReplicas expands agent entries with Replicas > 1 into individual
+// agent entries. Each replica is a copy of the original with a unique
+// name suffix. For replicas=1, the entry is left unchanged.
+//
+// Naming rules:
+//   - replicas=1, name="rev"   -> "rev" (unchanged)
+//   - replicas=3, name="rev"   -> "rev-0", "rev-1", "rev-2"
+//   - replicas=3, name=""      -> name left empty (assignAgentNames handles it later)
+func expandReplicas(agents []AgentConfig) []AgentConfig {
+	// Fast path: if all agents have replicas=1, return as-is.
+	needsExpansion := false
+	total := 0
+	for i := range agents {
+		if agents[i].Replicas > 1 {
+			needsExpansion = true
+		}
+		total += agents[i].Replicas
+	}
+	if !needsExpansion {
+		return agents
+	}
+
+	expanded := make([]AgentConfig, 0, total)
+	for _, a := range agents {
+		if a.Replicas <= 1 {
+			expanded = append(expanded, a)
+			continue
+		}
+
+		baseName := a.Name
+		for j := 0; j < a.Replicas; j++ {
+			replica := a
+			replica.Replicas = 1
+			if baseName != "" {
+				replica.Name = fmt.Sprintf("%s-%d", baseName, j)
+			}
+			// If baseName is empty, leave Name empty — assignAgentNames
+			// will handle it and produce unique names from the harness.
+			// Session is also left empty so it defaults to the final name.
+			replica.Session = ""
+			// Deep-copy the env map so replicas don't share a reference.
+			if a.Env != nil {
+				replica.Env = make(map[string]string, len(a.Env))
+				for k, v := range a.Env {
+					replica.Env[k] = v
+				}
+			}
+			expanded = append(expanded, replica)
+		}
+	}
+	return expanded
+}
+
+// assignAgentNames fills in Name and Session for agents that don't have them set.
+// The first agent with a given harness gets the harness name (e.g. "claude-code").
+// Subsequent unnamed agents with the same harness get "<harness>-1", "<harness>-2", etc.
+func assignAgentNames(agents []AgentConfig) {
+	// Count how many unnamed agents use each harness.
+	harnessCount := make(map[string]int)
+	for i := range agents {
+		if agents[i].Name == "" {
+			harnessCount[agents[i].Harness]++
+		}
+	}
+
+	// Assign names.
+	harnessIdx := make(map[string]int)
+	for i := range agents {
+		if agents[i].Name == "" {
+			h := agents[i].Harness
+			idx := harnessIdx[h]
+			harnessIdx[h]++
+
+			if harnessCount[h] == 1 {
+				agents[i].Name = h
+			} else {
+				agents[i].Name = fmt.Sprintf("%s-%d", h, idx)
+			}
+		}
+
+		// Default session to agent name (not harness) for uniqueness.
+		if agents[i].Session == "" {
+			agents[i].Session = agents[i].Name
+		}
 	}
 }
 
@@ -252,6 +363,10 @@ func (c *AgentConfig) Validate() error {
 	// extra_packages is only valid for sandboxed agents.
 	if c.Type != AgentTypeSandboxed && len(c.ExtraPackages) > 0 {
 		return fmt.Errorf("agent.extra_packages is only supported for type=sandboxed")
+	}
+
+	if c.Replicas < 1 {
+		return fmt.Errorf("agent.replicas must be >= 1, got %d", c.Replicas)
 	}
 
 	return nil

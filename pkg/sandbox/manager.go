@@ -142,7 +142,7 @@ func (m *Manager) Status() api.AgentStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return api.AgentStatus{
-		Name:     m.harness.Name(),
+		Name:     m.config.Name,
 		Running:  m.running,
 		Session:  m.sandboxID, // sandbox ID serves as the "session" identifier
 		Restarts: m.restarts,
@@ -196,8 +196,8 @@ func (m *Manager) ensureClosure(ctx context.Context) error {
 
 // launchSandbox creates an OCI bundle and runs the sandbox.
 func (m *Manager) launchSandbox(ctx context.Context) error {
-	// Generate a deterministic sandbox ID.
-	m.sandboxID = fmt.Sprintf("agent-%s", m.harness.Name())
+	// Generate a deterministic sandbox ID from the agent name.
+	m.sandboxID = fmt.Sprintf("agent-%s", m.config.Name)
 
 	// Create the bundle directory.
 	m.bundleDir = filepath.Join(m.bundleBaseDir, m.sandboxID)
@@ -281,7 +281,7 @@ func (m *Manager) launchSandbox(ctx context.Context) error {
 	m.lastErr = ""
 	m.mu.Unlock()
 
-	log.Printf("sandbox: agent %q launched in sandbox %q", m.harness.Name(), m.sandboxID)
+	log.Printf("sandbox: agent %q launched in sandbox %q", m.config.Name, m.sandboxID)
 	return nil
 }
 
@@ -384,16 +384,16 @@ func (m *Manager) run(ctx context.Context) {
 			m.running = false
 			m.mu.Unlock()
 
-			log.Printf("sandbox: agent %q exited", m.harness.Name())
+			log.Printf("sandbox: agent %q exited", m.config.Name)
 
 			if !m.shouldRestart() {
 				log.Printf("sandbox: not restarting agent %q (policy=%s, restarts=%d)",
-					m.harness.Name(), m.config.Restart, m.restarts)
+					m.config.Name, m.config.Restart, m.restarts)
 				return
 			}
 
 			m.restarts++
-			log.Printf("sandbox: restarting agent %q (attempt %d)", m.harness.Name(), m.restarts)
+			log.Printf("sandbox: restarting agent %q (attempt %d)", m.config.Name, m.restarts)
 
 			// Clean up old sandbox before restart.
 			cleanupCtx := context.Background()
@@ -408,7 +408,7 @@ func (m *Manager) run(ctx context.Context) {
 			}
 
 			if err := m.launchSandbox(ctx); err != nil {
-				log.Printf("sandbox: failed to restart agent %q: %v", m.harness.Name(), err)
+				log.Printf("sandbox: failed to restart agent %q: %v", m.config.Name, err)
 				m.mu.Lock()
 				m.lastErr = err.Error()
 				m.mu.Unlock()

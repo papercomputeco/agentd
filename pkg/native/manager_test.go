@@ -23,6 +23,7 @@ var _ = Describe("Manager", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			cfg := &config.AgentConfig{
+				Name:        "claude-code",
 				Harness:     "claude-code",
 				Workdir:     "/home/agent/workspace",
 				Restart:     config.RestartNo,
@@ -48,6 +49,7 @@ var _ = Describe("Manager", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			cfg := &config.AgentConfig{
+				Name:        "opencode",
 				Harness:     "opencode",
 				Workdir:     "/home/agent/workspace",
 				Restart:     config.RestartNo,
@@ -75,6 +77,7 @@ var _ = Describe("Manager", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			cfg := &config.AgentConfig{
+				Name:        "claude-code",
 				Harness:     "claude-code",
 				Workdir:     "/home/agent/workspace",
 				Restart:     config.RestartNo,
