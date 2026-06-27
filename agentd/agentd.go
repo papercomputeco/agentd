@@ -105,6 +105,7 @@ type Daemon struct {
 	debug             bool
 
 	// Sandbox configuration.
+	noSandbox        bool   // skip the gVisor/nix runtime entirely
 	runscPath        string // path to the runsc binary
 	sandboxStateDir  string // --root flag for runsc
 	sandboxBundleDir string // base directory for OCI bundles
@@ -137,6 +138,14 @@ func NewDaemon(configPath string) *Daemon {
 		sandboxBundleDir:  DefaultSandboxBundleDir,
 		agents:            make(map[string]*managedAgent),
 	}
+}
+
+// SetNoSandbox disables the gVisor sandbox runtime. When set, agentd skips the
+// runsc/nix startup checks and runs without a sandbox runner; sandboxed agents
+// then fail to launch (native/tmux agents and the API still work). Intended for
+// environments where gVisor is unavailable (e.g. a minimal capstan VM).
+func (d *Daemon) SetNoSandbox(noSandbox bool) {
+	d.noSandbox = noSandbox
 }
 
 // SetRunscPath overrides the auto-detected runsc binary path.
@@ -225,25 +234,34 @@ func (d *Daemon) AgentStatuses() []api.AgentStatus {
 func (d *Daemon) Run(ctx context.Context) error {
 	log.Println("agentd: initializing agent manager")
 
-	// 1. Verify required binaries. agentd runs on stereOS (NixOS) and
-	// requires both runsc (gVisor) and nix to be available.
-	if _, err := exec.LookPath("nix"); err != nil {
-		return fmt.Errorf("nix not found in PATH: %w", err)
-	}
+	// 1. Initialize the sandbox runtime, unless disabled. gVisor (runsc) and
+	// nix are only needed for sandboxed agents; --no-sandbox skips both so
+	// agentd can run where they're unavailable (e.g. a minimal capstan VM).
+	// Sandboxed agents then fail to launch (guarded below); native/tmux agents
+	// and the API still work.
+	if d.noSandbox {
+		log.Println("agentd: sandbox runtime disabled (--no-sandbox); sandboxed agents will not launch")
+	} else {
+		// Verify required binaries. agentd runs on stereOS (NixOS) and
+		// requires both runsc (gVisor) and nix to be available.
+		if _, err := exec.LookPath("nix"); err != nil {
+			return fmt.Errorf("nix not found in PATH: %w", err)
+		}
 
-	// Initialize sandbox runner. gVisor (runsc) is required — agentd
-	// cannot start without it since sandboxed is the default agent type.
-	runner, err := sandbox.NewRunner(d.runscPath, d.sandboxStateDir)
-	if err != nil {
-		return fmt.Errorf("sandbox runtime unavailable: %w", err)
-	}
-	d.runner = runner
-	d.runner.Debug = d.debug
-	log.Printf("agentd: sandbox runtime initialized (runsc=%s, state=%s)", runner.RunscPath, d.sandboxStateDir)
+		// Initialize sandbox runner. gVisor (runsc) is required — agentd
+		// cannot start without it since sandboxed is the default agent type.
+		runner, err := sandbox.NewRunner(d.runscPath, d.sandboxStateDir)
+		if err != nil {
+			return fmt.Errorf("sandbox runtime unavailable: %w", err)
+		}
+		d.runner = runner
+		d.runner.Debug = d.debug
+		log.Printf("agentd: sandbox runtime initialized (runsc=%s, state=%s)", runner.RunscPath, d.sandboxStateDir)
 
-	// Clean up any orphaned containers from a previous crash.
-	if err := d.runner.Cleanup(ctx); err != nil {
-		log.Printf("agentd: warning: sandbox cleanup: %v", err)
+		// Clean up any orphaned containers from a previous crash.
+		if err := d.runner.Cleanup(ctx); err != nil {
+			log.Printf("agentd: warning: sandbox cleanup: %v", err)
+		}
 	}
 
 	// 2. Start tmux server.
@@ -253,7 +271,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 	log.Printf("agentd: starting tmux server (run-as=%s)", AgentUser)
 	d.tmux = tmux.NewServerAs(d.tmuxSocketPath, AgentUser)
 	if err := d.tmux.Start(); err != nil {
-		return fmt.Errorf("starting tmux server: %w", err)
+		if d.noSandbox {
+			// Non-fatal: agentd still serves its API and status. Native (tmux)
+			// agents need a working tmux server + the agent user, so they cannot
+			// launch until that's available. This lets agentd run in a minimal
+			// environment (e.g. a capstan VM with no sudo/agent user) for
+			// control-plane bring-up.
+			log.Printf("agentd: warning: tmux server unavailable (%v); native agents cannot launch", err)
+		} else {
+			return fmt.Errorf("starting tmux server: %w", err)
+		}
 	}
 	defer func() {
 		log.Println("agentd: stopping tmux server")

@@ -32,6 +32,7 @@ func main() {
 	runscPath := flag.String("runsc-path", "", "path to runsc binary (auto-detected if empty)")
 	sandboxStateDir := flag.String("sandbox-state-dir", agentd.DefaultSandboxStateDir, "root directory for runsc container state")
 	sandboxBundleDir := flag.String("sandbox-bundle-dir", agentd.DefaultSandboxBundleDir, "base directory for OCI bundles")
+	noSandbox := flag.Bool("no-sandbox", false, "disable the gVisor sandbox runtime (skips runsc/nix; sandboxed agents won't launch)")
 	debug := flag.Bool("debug", false, "enable debug logging (logs commands, env keys, captures pane output on exit)")
 	flag.Parse()
 
@@ -59,6 +60,9 @@ func main() {
 	}
 	if *sandboxBundleDir != agentd.DefaultSandboxBundleDir {
 		daemon.SetSandboxBundleDir(*sandboxBundleDir)
+	}
+	if *noSandbox {
+		daemon.SetNoSandbox(true)
 	}
 	if *debug {
 		daemon.SetDebug(true)
