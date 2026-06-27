@@ -49,6 +49,13 @@ var _ = Describe("Daemon", func() {
 		})
 	})
 
+	Describe("SetNoSandbox", func() {
+		It("should not panic when disabling the sandbox runtime", func() {
+			d := agentd.NewDaemon("")
+			Expect(func() { d.SetNoSandbox(true) }).NotTo(Panic())
+		})
+	})
+
 	Describe("SetLaunchConcurrency", func() {
 		It("should not panic when setting concurrency", func() {
 			d := agentd.NewDaemon("")
