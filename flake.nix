@@ -4,9 +4,11 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    dagger.url = "github:dagger/nix";
+    dagger.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, dagger }:
     {
       overlays.default = final: prev: {
         agentd = final.buildGoModule {
@@ -85,6 +87,8 @@
 
             # Test tools
             hurl
+
+            dagger.packages.${system}.dagger
           ];
 
           shellHook = ''
